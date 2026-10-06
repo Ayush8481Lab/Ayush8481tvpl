@@ -325,11 +325,31 @@ export default {
       
       m3u += `${extinf},${name}\n`;
 
-      // Apply DRM configurations
-      if (c.keyId && c.key && c.keyId !== "null" && c.key !== "null") {
+      // ---------------------------------------------------------------
+      // Apply DRM configurations (UPDATED: supports multiple formats)
+      //   1. c.license  -> ClearKey JWK JSON string (multi-key, preferred)
+      //   2. c.keys[]   -> array of "kid:key" strings (multi-key)
+      //   3. c.keyId + c.key -> legacy single key "kid:key"
+      // ---------------------------------------------------------------
+      let licenseKey = "";
+
+      // Priority 1: New "license" field (already a JSON string or comma-separated string)
+      if (c.license && typeof c.license === "string" && c.license.trim() !== "" && c.license !== "null") {
+          licenseKey = c.license.trim();
+      }
+      // Priority 2: Array of "kid:key" pairs
+      else if (Array.isArray(c.keys) && c.keys.length > 0) {
+          licenseKey = c.keys.join(",");
+      }
+      // Priority 3: Legacy single keyId:key (or comma-separated pair list already present)
+      else if (c.keyId && c.key && c.keyId !== "null" && c.key !== "null" && c.keyId !== "" && c.key !== "") {
+          licenseKey = `${c.keyId}:${c.key}`;
+      }
+
+      if (licenseKey) {
         if (c.url.includes('.mpd')) m3u += `#KODIPROP:inputstream.adaptive.manifest_type=mpd\n`;
         m3u += `#KODIPROP:inputstream.adaptive.license_type=clearkey\n`;
-        m3u += `#KODIPROP:inputstream.adaptive.license_key=${c.keyId}:${c.key}\n`;
+        m3u += `#KODIPROP:inputstream.adaptive.license_key=${licenseKey}\n`;
       }
 
       // Inject strict User-Agent for specific domains
