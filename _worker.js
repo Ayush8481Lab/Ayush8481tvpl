@@ -327,28 +327,40 @@ export default {
 
       // ---------------------------------------------------------------
       // Apply DRM configurations (UPDATED: supports multiple formats)
-      //   1. c.license  -> ClearKey JWK JSON string (multi-key, preferred)
-      //   2. c.keys[]   -> array of "kid:key" strings (multi-key)
-      //   3. c.keyId + c.key -> legacy single key "kid:key"
+      //   1. c.licenseurl -> Widevine license URL (com.widevine.alpha)
+      //   2. c.license    -> ClearKey JWK JSON string (multi-key, preferred)
+      //   3. c.keys[]     -> array of "kid:key" strings (multi-key)
+      //   4. c.keyId + c.key -> legacy single key "kid:key"
       // ---------------------------------------------------------------
       let licenseKey = "";
+      let licenseType = "clearkey";
+      let hasLicense = false;
 
-      // Priority 1: New "license" field (already a JSON string or comma-separated string)
-      if (c.license && typeof c.license === "string" && c.license.trim() !== "" && c.license !== "null") {
-          licenseKey = c.license.trim();
+      // Priority 1: Widevine license URL
+      if (c.licenseurl && typeof c.licenseurl === "string" && c.licenseurl.trim() !== "" && c.licenseurl !== "null") {
+          licenseKey = c.licenseurl.trim();
+          licenseType = "com.widevine.alpha";
+          hasLicense = true;
       }
-      // Priority 2: Array of "kid:key" pairs
+      // Priority 2: New "license" field (ClearKey JWK JSON string or comma-separated string)
+      else if (c.license && typeof c.license === "string" && c.license.trim() !== "" && c.license !== "null") {
+          licenseKey = c.license.trim();
+          hasLicense = true;
+      }
+      // Priority 3: Array of "kid:key" pairs
       else if (Array.isArray(c.keys) && c.keys.length > 0) {
           licenseKey = c.keys.join(",");
+          hasLicense = true;
       }
-      // Priority 3: Legacy single keyId:key (or comma-separated pair list already present)
+      // Priority 4: Legacy single keyId:key (or comma-separated pair list already present)
       else if (c.keyId && c.key && c.keyId !== "null" && c.key !== "null" && c.keyId !== "" && c.key !== "") {
           licenseKey = `${c.keyId}:${c.key}`;
+          hasLicense = true;
       }
 
-      if (licenseKey) {
+      if (hasLicense) {
         if (c.url.includes('.mpd')) m3u += `#KODIPROP:inputstream.adaptive.manifest_type=mpd\n`;
-        m3u += `#KODIPROP:inputstream.adaptive.license_type=clearkey\n`;
+        m3u += `#KODIPROP:inputstream.adaptive.license_type=${licenseType}\n`;
         m3u += `#KODIPROP:inputstream.adaptive.license_key=${licenseKey}\n`;
       }
 
