@@ -1,3 +1,5 @@
+let schemaReady = false;
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -35,56 +37,113 @@ export default {
     }
 
     // ============================================================
-    // IST DATE / TIME + LOGGING HELPERS
+    // D1 SCHEMA INIT (idempotent, once per isolate)
+    // ============================================================
+    const hasD1 = !!(env && env.LOGS_DB);
+    if (hasD1 && !schemaReady) {
+      try {
+        await env.LOGS_DB.exec(`
+          CREATE TABLE IF NOT EXISTS logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token TEXT NOT NULL,
+            date TEXT NOT NULL,
+            ts TEXT NOT NULL,
+            ua TEXT,
+            ip TEXT,
+            geo TEXT,
+            action TEXT,
+            colo TEXT
+          );
+          CREATE INDEX IF NOT EXISTS idx_logs_token_date ON logs(token, date);
+          CREATE INDEX IF NOT EXISTS idx_logs_date ON logs(date);
+        `);
+        schemaReady = true;
+      } catch (e) {
+        // Table may already exist, or DB not yet ready — retried next request
+      }
+    }
+
+    // ============================================================
+    // CLIENT DETECTION
+    // ============================================================
+    const uaRaw = request.headers.get('user-agent') || '';
+    const uaLower = uaRaw.toLowerCase();
+    const acceptHeader = (request.headers.get('accept') || '').toLowerCase();
+    const secFetchDest = request.headers.get('sec-fetch-dest');
+    const isPlayerUA = /tivimate|exoplayer|vlc|kodi|iptv|smarters|player|mpv|ffmpeg|lavf|libvlc|miplay|xj/;
+    const isBrowser = !isPlayerUA.test(uaLower) && ((secFetchDest === 'document') || acceptHeader.includes('text/html'));
+    const forceNoCache = url.searchParams.get('nocache') === '1';
+    const isDebug = url.searchParams.get('debug') === '1';
+
+    // ============================================================
+    // IST DATE / TIME
     // ============================================================
     const nowMs = Date.now();
-    const istDateObj = new Date(nowMs + 19800000); // UTC -> IST (represented as fake UTC)
+    const istDateObj = new Date(nowMs + 19800000);
     const istDateString = istDateObj.toISOString().split('T')[0];
 
     const escapeHtml = (s) => String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
-    // Read logs for a token/date. Prefers KV (global), falls back to Cache API.
+    // ============================================================
+    // LOG READ / WRITE HELPERS (D1 preferred, cache fallback)
+    // ============================================================
+    const cacheKey = (token, date) => `https://dummy.internal.local/logs/${token}/${date}`;
+
     const getLogsForDate = async (token, dateStr) => {
-      try {
-        if (env && env.LOGS_KV) {
-          const v = await env.LOGS_KV.get(`logs/${token}/${dateStr}`);
-          return v ? JSON.parse(v) : [];
+      if (hasD1) {
+        try {
+          const res = await env.LOGS_DB.prepare(
+            "SELECT ts, ua, ip, geo, action, colo FROM logs WHERE token = ? AND date = ? ORDER BY id DESC LIMIT 1000"
+          ).bind(token, dateStr).all();
+          return res.results || [];
+        } catch (e) {
+          return [];
         }
-        const cache = caches.default;
-        const res = await cache.match(new Request(`https://dummy.internal.local/logs/${token}/${dateStr}`));
-        if (res) return await res.json();
+      }
+      // Cache fallback — stored in insertion (oldest-first) order, reverse for newest-first
+      try {
+        const res = await caches.default.match(new Request(cacheKey(token, dateStr)));
+        if (res) return (await res.json()).reverse();
       } catch (e) {}
       return [];
     };
 
-    // Append a log entry (capped at 1000/day to keep storage bounded).
     const appendLog = async (token, dateStr, entry) => {
-      const logs = await getLogsForDate(token, dateStr);
-      logs.push(entry);
-      if (logs.length > 1000) logs.splice(0, logs.length - 1000);
-      const body = JSON.stringify(logs);
-      try {
-        if (env && env.LOGS_KV) {
-          await env.LOGS_KV.put(`logs/${token}/${dateStr}`, body, { expirationTtl: 8 * 86400 });
-        } else {
-          const cache = caches.default;
-          await cache.put(
-            new Request(`https://dummy.internal.local/logs/${token}/${dateStr}`),
-            new Response(body, { headers: { "Cache-Control": `max-age=${8 * 86400}` } })
-          );
+      if (hasD1) {
+        try {
+          const cutoff = new Date(Date.now() + 19800000 - 8 * 86400000).toISOString().split('T')[0];
+          await env.LOGS_DB.batch([
+            env.LOGS_DB.prepare(
+              "INSERT INTO logs (token, date, ts, ua, ip, geo, action, colo) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            ).bind(token, dateStr, entry.ts, entry.ua, entry.ip, entry.geo, entry.action, entry.colo),
+            env.LOGS_DB.prepare("DELETE FROM logs WHERE date < ?").bind(cutoff)
+          ]);
+        } catch (e) {
+          // Log lost on D1 failure — acceptable for logging
         }
+        return;
+      }
+      // Cache fallback (per-colo, capped at 1000/day)
+      try {
+        const logs = await getLogsForDate(token, dateStr);
+        logs.unshift(entry); // newest first
+        const capped = logs.slice(0, 1000);
+        await caches.default.put(
+          new Request(cacheKey(token, dateStr)),
+          new Response(JSON.stringify(capped.slice().reverse()), {
+            headers: { "Cache-Control": `max-age=${8 * 86400}` }
+          })
+        );
       } catch (e) {}
     };
 
-    // ------------------------------------------------------------
-    // Build "[AS45609 Bharti Airtel Limited, Lucknow, Uttar Pradesh, IN]"
-    // straight from Cloudflare's built-in `request.cf` — free, instant,
-    // no rate limits, works for IPv6, no external API call.
-    // ------------------------------------------------------------
+    // ============================================================
+    // IP → "[AS45609 Bharti Airtel Limited, Lucknow, Uttar Pradesh, IN]"
+    // Cloudflare's request.cf is authoritative and always populated.
+    // ============================================================
     const buildGeoFromCF = (cf) => {
       if (!cf) return '';
-      const asnNum = cf.asn;
-      const asn = asnNum ? `AS${asnNum}` : '';
+      const asn = cf.asn ? `AS${cf.asn}` : '';
       const org = cf.asOrganization || '';
       const asnPart = [asn, org].filter(Boolean).join(' ');
       const parts = [asnPart, cf.city, cf.region, cf.countryCode].filter(Boolean);
@@ -92,12 +151,8 @@ export default {
     };
 
     const lookupIP = async (ip, cf) => {
-      // 1) Cloudflare built-in geo (production — always populated, IPv4 + IPv6)
       const cfGeo = buildGeoFromCF(cf);
       if (cfGeo) return cfGeo;
-
-      // 2) Fallback for local dev / cf-missing (ip-api.com is IPv6-safe and
-      //    returns the full AS string in a single field).
       if (!ip || ip === 'unknown' || ip === '::1' || ip.startsWith('127.') || ip === 'localhost') return '';
       try {
         const controller = new AbortController();
@@ -118,14 +173,13 @@ export default {
       return '';
     };
 
-    // Fire-and-forget logging. Skipped for the credit dashboard itself so
-    // that refreshing the page doesn't inflate your usage logs.
-    if (action !== 'credit') {
-      const clientIP = request.headers.get('cf-connecting-ip')
-        || (request.headers.get('x-forwarded-for') || '').split(',')[0].trim()
-        || request.headers.get('x-real-ip')
-        || 'unknown';
-      const ua = request.headers.get('user-agent') || 'Unknown';
+    // ============================================================
+    // LOG THE REQUEST (skip credit page + debug)
+    // ============================================================
+    if (action !== 'credit' && !isDebug) {
+      const xff = (request.headers.get('x-forwarded-for') || '').split(',')[0].trim();
+      const cfIP = request.headers.get('cf-connecting-ip') || '';
+      const clientIP = xff || cfIP || request.headers.get('x-real-ip') || 'unknown';
 
       ctx.waitUntil((async () => {
         const geo = await lookupIP(clientIP, request.cf);
@@ -133,15 +187,17 @@ export default {
         const tsStr = istNow.toISOString().replace('T', ' ').substring(0, 19) + ' IST';
         await appendLog(pathToken, istDateString, {
           ts: tsStr,
-          ua: ua,
+          ua: uaRaw || 'Unknown',
           ip: clientIP,
-          geo: geo
+          geo: geo,
+          action: action || 'playlist',
+          colo: request.cf?.colo || '?'
         });
       })());
     }
 
     // ============================================================
-    // --- Helper: generic cached cookie ---
+    // --- Helper: generic cached cookie --- (unchanged)
     // ============================================================
     const getCachedCookie = async (fetchUrl, cacheKeyUrl, prefix) => {
       const cache = caches.default;
@@ -181,7 +237,7 @@ export default {
     };
 
     // ============================================================
-    // --- Helper: SonyLiv rotating cookie ---
+    // --- Helper: SonyLiv rotating cookie --- (unchanged)
     // ============================================================
     const getSonyLivCookie = async () => {
       const cache = caches.default;
@@ -223,23 +279,53 @@ export default {
       return "";
     };
 
-    // 2. Track Request Count (Rate Limits Removed)
+    // ============================================================
+    // COUNT (D1 → COUNT(*), cache → stored counter)
+    // ============================================================
+    const cache = caches.default;
     const rlCacheUrl = new URL(`https://dummy.internal.local/ratelimit/${pathToken}/${istDateString}`);
     const rlRequest = new Request(rlCacheUrl.href);
-    const cache = caches.default;
+
     let reqCount = 0;
-    
-    const cachedLimit = await cache.match(rlRequest);
-    if (cachedLimit) {
-      reqCount = parseInt(await cachedLimit.text(), 10) || 0;
+    if (hasD1) {
+      try {
+        const r = await env.LOGS_DB.prepare(
+          "SELECT COUNT(*) as c FROM logs WHERE token = ? AND date = ?"
+        ).bind(pathToken, istDateString).first();
+        reqCount = r?.c || 0;
+      } catch (e) {}
+    } else {
+      const cachedLimit = await cache.match(rlRequest);
+      if (cachedLimit) reqCount = parseInt(await cachedLimit.text(), 10) || 0;
     }
 
     // ============================================================
-    // 3. Credit Endpoint — HTML dashboard with last-7-day logs
+    // DEBUG ENDPOINT — /<token>?debug=1
+    // ============================================================
+    if (isDebug) {
+      const todayLogs = await getLogsForDate(pathToken, istDateString);
+      return new Response(JSON.stringify({
+        ok: true,
+        colo: request.cf?.colo || 'unknown',
+        country: request.cf?.country || 'unknown',
+        token: pathToken,
+        action: action || 'playlist',
+        isBrowser,
+        ua: uaRaw,
+        backend: hasD1 ? 'd1' : 'cache',
+        reqCount,
+        todayLogsCount: todayLogs.length,
+        todayLast5: todayLogs.slice(0, 5),
+        warning: hasD1 ? null : 'D1 NOT BOUND — logs are edge-local and may not appear from other colos. Bind a D1 database as LOGS_DB for global logs.'
+      }, null, 2), {
+        headers: { "Content-Type": "application/json", "Cache-Control": "no-store" }
+      });
+    }
+
+    // ============================================================
+    // 3. Credit Endpoint — HTML dashboard (last 7 days)
     // ============================================================
     if (action === "credit") {
-
-      // Backward-compat: /credit/<token>?raw=1 -> plain text
       if (url.searchParams.get('raw') === '1') {
         return new Response(`${reqCount} / Unlimited`, {
           status: 200,
@@ -250,10 +336,28 @@ export default {
       const today = new Date(nowMs + 19800000);
       const dates = [];
       for (let i = 0; i < 7; i++) {
-        const d = new Date(today.getTime() - i * 86400000);
-        dates.push(d.toISOString().split('T')[0]);
+        dates.push(new Date(today.getTime() - i * 86400000).toISOString().split('T')[0]);
       }
-      const allLogs = await Promise.all(dates.map(d => getLogsForDate(pathToken, d)));
+
+      // Fetch logs for all 7 days in parallel
+      let allLogs = [];
+      if (hasD1) {
+        try {
+          const results = await env.LOGS_DB.batch(
+            dates.map(d => env.LOGS_DB.prepare(
+              "SELECT ts, ua, ip, geo, action, colo FROM logs WHERE token = ? AND date = ? ORDER BY id DESC LIMIT 1000"
+            ).bind(pathToken, d))
+          );
+          allLogs = results.map(r => r.results || []);
+        } catch (e) {
+          allLogs = dates.map(() => []);
+        }
+      } else {
+        allLogs = await Promise.all(dates.map(d => getLogsForDate(pathToken, d)));
+      }
+
+      // Daily counts — derived from logs when D1, else from cache counter (today only)
+      const counts = dates.map((d, i) => (i === 0 && !hasD1) ? Math.max(reqCount, allLogs[i].length) : allLogs[i].length);
 
       let html = `<!DOCTYPE html>
 <html>
@@ -276,16 +380,32 @@ export default {
   .ua { color: #ffa657; }
   .ip { color: #7ee787; }
   .geo { color: #d2a8ff; }
+  .action { color: #f778ba; }
+  .colo { color: #6e7681; font-size: 11px; }
   .count { color: #ff7b72; font-weight: 600; }
   code { background: #21262d; padding: 2px 6px; border-radius: 4px; color: #c9d1d9; }
   .empty { color: #6e7681; font-style: italic; }
+  .warn { background: #3d1d1d; border: 1px solid #f85149; color: #ff7b72; padding: 14px 16px; border-radius: 8px; margin-bottom: 16px; line-height: 1.6; }
+  .ok { color: #7ee787; }
+  .badge-ok { background:#1a3a1a; border:1px solid #2ea043; color:#7ee787; padding:2px 8px; border-radius:6px; font-size:12px; }
+  .badge-bad { background:#3d1d1d; border:1px solid #f85149; color:#ff7b72; padding:2px 8px; border-radius:6px; font-size:12px; }
 </style>
 </head>
 <body>
-<h1>Usage Logs · <code>${escapeHtml(pathToken)}</code></h1>
-<div class="summary">
-  <div>Today's all requests (incl. credit views): <span class="count">${reqCount}</span> / Unlimited</div>
-  <div>Today's logged calls (excl. credit views): <span class="count">${(allLogs[0] || []).length}</span></div>
+<h1>Usage Logs · <code>${escapeHtml(pathToken)}</code></h1>`;
+
+      if (!hasD1) {
+        html += `<div class="warn"><strong>⚠️ D1 NOT BOUND — logs are stored per‑colo in the Cache API.</strong><br>
+        Requests hitting a <em>different</em> Cloudflare colo (e.g. a Vercel proxy in another region) will <strong>NOT</strong> appear here.<br>
+        <strong>Fix:</strong> create a D1 database, bind it as <code>LOGS_DB</code> in Worker settings, redeploy. Visit <code>/${escapeHtml(pathToken)}?debug=1</code> to verify.</div>`;
+      }
+
+      html += `<div class="summary">
+  <div>Backend: ${hasD1
+    ? '<span class="badge-ok">D1 (global) ✓</span>'
+    : '<span class="badge-bad">Cache API (per‑colo)</span>'}</div>
+  <div>Rendered from colo: <code>${escapeHtml(request.cf?.colo || '?')}</code></div>
+  <div>Today's logged requests: <span class="count">${counts[0]}</span> / Unlimited</div>
 </div>
 <h2>Last 7 Days</h2>`;
 
@@ -293,18 +413,28 @@ export default {
       for (let i = 0; i < dates.length; i++) {
         const date = dates[i];
         const logs = allLogs[i] || [];
-        totalLogs += logs.length;
-        html += `<div class="day"><h3>Date - ${date} - <span class="count">${logs.length} calls</span></h3>`;
+        totalLogs += counts[i];
+        html += `<div class="day"><h3>Date - ${date} - <span class="count">${counts[i]} calls</span></h3>`;
         if (logs.length === 0) {
           html += `<div class="entry empty">No calls recorded.</div>`;
         } else {
-          logs.slice().reverse().forEach(l => {
-            html += `<div class="entry"><span class="ts">${escapeHtml(l.ts)}</span> · <span class="ua">${escapeHtml(l.ua || 'Unknown')}</span> · <span class="ip">${escapeHtml(l.ip)}</span> <span class="geo">${escapeHtml(l.geo || '')}</span></div>`;
+          logs.forEach(l => {
+            html += `<div class="entry">` +
+              `<span class="ts">${escapeHtml(l.ts)}</span> · ` +
+              `<span class="ua">${escapeHtml(l.ua || 'Unknown')}</span> · ` +
+              `<span class="ip">${escapeHtml(l.ip)}</span> ` +
+              `<span class="geo">${escapeHtml(l.geo || '')}</span> · ` +
+              `<span class="action">${escapeHtml(l.action || 'playlist')}</span> ` +
+              `<span class="colo">[${escapeHtml(l.colo || '?')}]</span>` +
+              `</div>`;
           });
+          if (counts[i] > logs.length) {
+            html += `<div class="entry empty">…and ${counts[i] - logs.length} more (display capped at 1000/day)</div>`;
+          }
         }
         html += `</div>`;
       }
-      html += `<div class="summary" style="margin-top:16px;"><div>7-day total logged calls: <span class="count">${totalLogs}</span></div></div>`;
+      html += `<div class="summary" style="margin-top:16px;"><div>7‑day total logged calls: <span class="count">${totalLogs}</span></div></div>`;
       html += `</body></html>`;
 
       return new Response(html, {
@@ -347,12 +477,7 @@ export default {
       return Response.redirect(finalCatchupUrl, 302);
     }
 
-    // 5. Determine if it is a Browser
-    const acceptHeader = (request.headers.get('accept') || '').toLowerCase();
-    const secFetchDest = request.headers.get('sec-fetch-dest');
-    const isBrowser = (secFetchDest === 'document') || acceptHeader.includes('text/html');
-
-    // 6. Fetch Core Data
+    // 5. Fetch Core Data
     const fetchJson = async (target) => {
       try {
         const res = await fetch(target, { headers: { 'User-Agent': 'Mozilla/5.0' } });
@@ -444,7 +569,7 @@ export default {
       }
     });
 
-    // 7. Apply Custom Playlist Sorting & Filtering
+    // 6. Apply Custom Playlist Sorting & Filtering
     if (customPlaylistData && Array.isArray(customPlaylistData) && customPlaylistData.length > 0) {
         const channelMap = new Map();
         finalChannels.forEach(c => channelMap.set(String(c.id || c.channel_id), c));
@@ -461,7 +586,7 @@ export default {
         if (sortedChannels.length > 0) finalChannels = sortedChannels;
     }
 
-    // 8. Generate Final M3U Playlist
+    // 7. Generate Final M3U Playlist
     let m3u = `#EXTM3U x-tvg-url="https://epg.ayush848694.workers.dev/${pathToken}"\n\n`;
     
     finalChannels.forEach(c => {
@@ -530,31 +655,33 @@ export default {
       }
     });    
 
-    // 9. Track usage count
-    const nextCount = reqCount + 1;
-    const nextMidnightIST = new Date(istDateObj);
-    nextMidnightIST.setUTCHours(23, 59, 59, 999);
-    const secondsToMidnight = Math.floor((nextMidnightIST.getTime() - istDateObj.getTime()) / 1000);
-    
-    ctx.waitUntil(cache.put(rlRequest, new Response(nextCount.toString(), {
-      headers: { "Cache-Control": `max-age=${secondsToMidnight}` }
-    })));
+    // 8. Cache count increment (only when D1 is not bound — D1 count comes from COUNT(*))
+    if (!hasD1) {
+      const nextCount = reqCount + 1;
+      const nextMidnightIST = new Date(istDateObj);
+      nextMidnightIST.setUTCHours(23, 59, 59, 999);
+      const secondsToMidnight = Math.floor((nextMidnightIST.getTime() - istDateObj.getTime()) / 1000);
+      ctx.waitUntil(cache.put(rlRequest, new Response(nextCount.toString(), {
+        headers: { "Cache-Control": `max-age=${secondsToMidnight}` }
+      })));
+    }
 
-    // 10. Return Response
+    // 9. Return Response
     const responseHeaders = {
         "Content-Type": "application/vnd.apple.mpegurl; charset=utf-8",
         "Access-Control-Allow-Origin": "*",
-        "Content-Disposition": "attachment; filename=\"Ayush@8481.m3u\""
+        "Content-Disposition": "attachment; filename=\"Ayush@8481.m3u\"",
+        "Vary": "User-Agent, Accept, Sec-Fetch-Dest"
     };
     
-    if (isBrowser) {
+    if (isBrowser && !forceNoCache) {
         responseHeaders["Cache-Control"] = "public, max-age=259200";
     } else {
-        responseHeaders["Cache-Control"] = "no-cache, no-store, must-revalidate";
+        responseHeaders["Cache-Control"] = "private, no-cache, no-store, must-revalidate, max-age=0";
+        responseHeaders["Pragma"] = "no-cache";
+        responseHeaders["Expires"] = "0";
     }
     
-    return new Response(m3u, {
-      headers: responseHeaders
-    });
+    return new Response(m3u, { headers: responseHeaders });
   }
 };
