@@ -17,7 +17,7 @@ export default {
         pathToken = pathParts[1];
     } else {
         pathToken = pathParts[0];
-        action = pathParts[1]; // e.g. "catchup.mpd"
+        action = pathParts[1];
     }
 
     const workerBase = `${url.origin}/${pathToken}`;
@@ -26,7 +26,9 @@ export default {
       return new Response("Token required. Format: /<token> or /credit/<token>", { status: 400 });
     }
 
+    // ============================================================
     // 1. Verify Access Token
+    // ============================================================
     try {
       const accessReq = await fetch("https://raw.githubusercontent.com/Ayush8481Lab/Sar/refs/heads/main/app/data/access.json", {
         headers: { 'User-Agent': 'Mozilla/5.0' }
@@ -40,7 +42,32 @@ export default {
     }
 
     // ============================================================
-    // D1 BINDING CHECK + SCHEMA INIT (robust, per-statement)
+    // 2. BLOCK DATA CENTER PROVIDERS (Amazon / Cloudflare / Google)
+    //    Matches on request.cf.asOrganization by keyword — covers
+    //    all of their ASNs (13335, 16509, 14618, 15169, 396982,
+    //    19527, 8987, 38895, etc.) with one simple check.
+    //    Add ?allow=1 to any URL to bypass (for trusted testing).
+    // ============================================================
+    const BLOCKED_KEYWORDS = ["amazon", "cloudflare", "google"];
+    const asOrgRaw = (request.cf?.asOrganization || '').toLowerCase();
+    const isBlockedOrg = BLOCKED_KEYWORDS.some(kw => asOrgRaw.includes(kw));
+    const allowBypass = url.searchParams.get('allow') === '1';
+
+    if (isBlockedOrg && !allowBypass) {
+      return new Response(
+        `Access denied. Requests from ${request.cf?.asOrganization || 'data centers'} are not permitted.`,
+        {
+          status: 403,
+          headers: {
+            "Content-Type": "text/plain",
+            "Cache-Control": "no-store"
+          }
+        }
+      );
+    }
+
+    // ============================================================
+    // D1 BINDING CHECK + SCHEMA INIT
     // ============================================================
     const hasD1 = !!(env && env.LOGS_DB);
     if (hasD1 && !schemaReady) {
@@ -129,14 +156,12 @@ export default {
           lastInsertError = null;
         } catch (e) {
           lastInsertError = String(e && e.message ? e.message : e);
-          // If table is gone, force schema retry on next request
           if (lastInsertError.toLowerCase().includes('no such table')) {
             schemaReady = false;
           }
         }
         return;
       }
-      // Cache fallback (per-colo, capped at 1000/day)
       try {
         const logs = await getLogsForDate(token, dateStr);
         logs.unshift(entry);
@@ -292,40 +317,43 @@ export default {
     };
 
     // ============================================================
-    // COUNT
+    // COUNT (D1 → COUNT(*), cache → stored counter)
     // ============================================================
     const cache = caches.default;
     const rlCacheUrl = new URL(`https://dummy.internal.local/ratelimit/${pathToken}/${istDateString}`);
     const rlRequest = new Request(rlCacheUrl.href);
 
     let reqCount = 0;
+    let countError = null;
     if (hasD1 && schemaReady) {
       try {
         const r = await env.LOGS_DB.prepare(
           "SELECT COUNT(*) as c FROM logs WHERE token = ? AND date = ?"
         ).bind(pathToken, istDateString).first();
         reqCount = r?.c || 0;
-      } catch (e) {}
+      } catch (e) {
+        countError = String(e && e.message ? e.message : e);
+      }
     } else {
       const cachedLimit = await cache.match(rlRequest);
       if (cachedLimit) reqCount = parseInt(await cachedLimit.text(), 10) || 0;
     }
 
     // ============================================================
-    // DEBUG ENDPOINT — /<token>?debug=1  (or with &test=1)
+    // DEBUG ENDPOINT — /<token>?debug=1  (or &test=1, &raw=1)
     // ============================================================
     if (isDebug) {
       let testResult = null;
-      if (url.searchParams.get('test') === '1' && hasD1) {
+      if (url.searchParams.get('test') === '1' && hasD1 && schemaReady) {
         try {
           await env.LOGS_DB.prepare(
             "INSERT INTO logs (token, date, ts, ua, ip, geo, action, colo) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
           ).bind(
             pathToken, istDateString,
-            'TEST ENTRY ' + new Date().toISOString(),
+            new Date(Date.now() + 19800000).toISOString().replace('T', ' ').substring(0, 19) + ' IST',
             'TEST-UA', 'TEST-IP', 'TEST-GEO', 'test', request.cf?.colo || '?'
           ).run();
-          testResult = { ok: true, message: "Test row inserted. Reload /credit/<token> to see it." };
+          testResult = { ok: true, message: "Test row inserted. Open /credit/<token> to see it." };
         } catch (e) {
           testResult = { ok: false, error: String(e && e.message ? e.message : e) };
         }
@@ -333,34 +361,59 @@ export default {
 
       const todayLogs = await getLogsForDate(pathToken, istDateString);
 
+      let rawCount = null, rawRows = null, rawError = null;
+      if (hasD1 && schemaReady) {
+        try {
+          const cr = await env.LOGS_DB.prepare(
+            "SELECT COUNT(*) as c FROM logs WHERE token = ?"
+          ).bind(pathToken).first();
+          rawCount = cr?.c || 0;
+          if (url.searchParams.get('raw') === '1') {
+            const rr = await env.LOGS_DB.prepare(
+              "SELECT id, date, ts, action, colo FROM logs WHERE token = ? ORDER BY id DESC LIMIT 20"
+            ).bind(pathToken).all();
+            rawRows = rr.results || [];
+          }
+        } catch (e) {
+          rawError = String(e && e.message ? e.message : e);
+        }
+      }
+
       return new Response(JSON.stringify({
         ok: true,
         colo: request.cf?.colo || 'unknown',
-        country: request.cf?.country || 'unknown',
         token: pathToken,
         action: action || 'playlist',
         isBrowser,
         ua: uaRaw,
+        asOrganization: request.cf?.asOrganization || null,
+        asn: request.cf?.asn || null,
+        blocked: isBlockedOrg,
+        allowBypass,
         hasD1,
         schemaReady,
         schemaError,
+        countError,
         lastInsertError,
         lastInsertOk: lastInsertOk ? new Date(lastInsertOk + 19800000).toISOString().replace('T',' ').substring(0,19) + ' IST' : null,
         reqCount,
         todayLogsCount: todayLogs.length,
         todayLast5: todayLogs.slice(0, 5),
+        rawD1Count: rawCount,
+        rawD1Rows: rawRows,
+        rawError,
         testResult,
         logKey: `logs/${pathToken}/${istDateString}`,
         warning: !hasD1
-          ? 'D1 NOT BOUND — logs go to per-colo Cache API only. Bind a D1 database as LOGS_DB.'
+          ? 'D1 NOT BOUND — bind a D1 database as LOGS_DB.'
           : (!schemaReady
-              ? 'D1 BOUND but schema not ready. See schemaError above.'
+              ? 'D1 BOUND but schema not ready. See schemaError.'
               : null),
         hint: hasD1 && schemaReady && todayLogs.length === 0
-          ? 'D1 ready but 0 logs today. Hit the playlist URL (NOT /credit) to create a log, or visit ?debug=1&test=1 to force a test insert.'
+          ? 'D1 ready but 0 logs today. Hit the PLAYLIST URL /' + pathToken + '?nocache=1 (not /credit), or use ?test=1.'
           : null
       }, null, 2), {
-        headers: { "Content-Type": "application/json", "Cache-Control": "no-store" }
+        headers: { "Content-Type": "application/json", "Cache-Control": "no-store", "CDN-Cache-Control": "no-store" }
       });
     }
 
@@ -382,22 +435,28 @@ export default {
       }
 
       let allLogs = [];
+      let queryError = null;
       if (hasD1 && schemaReady) {
         try {
-          const results = await env.LOGS_DB.batch(
-            dates.map(d => env.LOGS_DB.prepare(
-              "SELECT ts, ua, ip, geo, action, colo FROM logs WHERE token = ? AND date = ? ORDER BY id DESC LIMIT 1000"
-            ).bind(pathToken, d))
+          const results = await Promise.all(
+            dates.map(d =>
+              env.LOGS_DB.prepare(
+                "SELECT ts, ua, ip, geo, action, colo FROM logs WHERE token = ? AND date = ? ORDER BY id DESC LIMIT 1000"
+              ).bind(pathToken, d).all()
+            )
           );
-          allLogs = results.map(r => r.results || []);
+          allLogs = results.map(r => (r && Array.isArray(r.results)) ? r.results : []);
         } catch (e) {
+          queryError = String(e && e.message ? e.message : e);
           allLogs = dates.map(() => []);
         }
       } else {
         allLogs = await Promise.all(dates.map(d => getLogsForDate(pathToken, d)));
       }
 
-      const counts = dates.map((d, i) => (i === 0 && !(hasD1 && schemaReady)) ? Math.max(reqCount, allLogs[i].length) : allLogs[i].length);
+      const counts = dates.map((d, i) => i === 0 ? Math.max(reqCount, allLogs[0].length) : allLogs[i].length);
+      const totalLogs = counts.reduce((a, b) => a + b, 0);
+      const generatedAt = new Date(Date.now() + 19800000).toISOString().replace('T', ' ').substring(0, 19) + ' IST';
 
       let html = `<!DOCTYPE html>
 <html>
@@ -416,12 +475,8 @@ export default {
   .day { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px 16px; margin: 12px 0; }
   .entry { font-size: 12.5px; padding: 6px 0; border-bottom: 1px solid #21262d; word-break: break-all; }
   .entry:last-child { border-bottom: none; }
-  .ts { color: #79c0ff; }
-  .ua { color: #ffa657; }
-  .ip { color: #7ee787; }
-  .geo { color: #d2a8ff; }
-  .action { color: #f778ba; }
-  .colo { color: #6e7681; font-size: 11px; }
+  .ts { color: #79c0ff; } .ua { color: #ffa657; } .ip { color: #7ee787; } .geo { color: #d2a8ff; }
+  .action { color: #f778ba; } .colo { color: #6e7681; font-size: 11px; }
   .count { color: #ff7b72; font-weight: 600; }
   code { background: #21262d; padding: 2px 6px; border-radius: 4px; color: #c9d1d9; }
   .empty { color: #6e7681; font-style: italic; }
@@ -431,48 +486,48 @@ export default {
   .badge-ok { background:#1a3a1a; border:1px solid #2ea043; color:#7ee787; padding:2px 8px; border-radius:6px; font-size:12px; }
   .badge-bad { background:#3d1d1d; border:1px solid #f85149; color:#ff7b72; padding:2px 8px; border-radius:6px; font-size:12px; }
   a { color: #58a6ff; }
+  .generated { color: #6e7681; font-size: 11px; margin-top: 8px; }
 </style>
 </head>
 <body>
 <h1>Usage Logs · <code>${escapeHtml(pathToken)}</code></h1>`;
 
-      // ─── Diagnostic banner stack ───
       if (!hasD1) {
-        html += `<div class="warn"><strong>⚠️ D1 NOT BOUND — logs are stored per-colo in the Cache API.</strong><br>
-        Requests hitting a <em>different</em> Cloudflare colo will NOT appear here.<br>
-        <strong>Fix:</strong> create a D1 database <code>ayush-logs</code>, bind it to this Pages project as <code>LOGS_DB</code> (Settings → Functions → Bindings → D1 database), then redeploy.<br>
-        Verify with <a href="?debug=1">?debug=1</a>.</div>`;
+        html += `<div class="warn"><strong>⚠️ D1 NOT BOUND.</strong> Bind a D1 database as <code>LOGS_DB</code> in Pages → Settings → Functions → Bindings.</div>`;
       } else if (!schemaReady) {
-        html += `<div class="warn"><strong>⚠️ D1 bound but schema creation failed.</strong><br>
-        <strong>Error:</strong> <code>${escapeHtml(schemaError || 'unknown')}</code><br>
-        Try <a href="?debug=1">?debug=1</a> — the error will be shown there and schema will be re-attempted.</div>`;
-      } else if (lastInsertError) {
-        html += `<div class="warn"><strong>⚠️ D1 bound &amp; schema ready, but the last insert failed.</strong><br>
-        <strong>Error:</strong> <code>${escapeHtml(lastInsertError)}</code><br>
-        Try <a href="?debug=1&test=1">?debug=1&test=1</a> to force a test insert and see the error.</div>`;
+        html += `<div class="warn"><strong>⚠️ Schema not ready.</strong> Error: <code>${escapeHtml(schemaError || 'unknown')}</code></div>`;
+      } else if (queryError) {
+        html += `<div class="warn"><strong>⚠️ D1 query failed on this render.</strong> <code>${escapeHtml(queryError)}</code></div>`;
+      } else if (countError) {
+        html += `<div class="warn"><strong>⚠️ COUNT(*) failed.</strong> <code>${escapeHtml(countError)}</code></div>`;
       }
 
-      if (hasD1 && schemaReady && counts[0] === 0) {
-        html += `<div class="info"><strong>ℹ️ D1 is bound and working, but no logs exist for today.</strong><br>
-        Only requests to the <strong>playlist URL</strong> (<code>/${escapeHtml(pathToken)}</code>) create logs — visiting <code>/credit/${escapeHtml(pathToken)}</code> does not.<br>
-        Open <a href="/${escapeHtml(pathToken)}">/${escapeHtml(pathToken)}</a> in a player, or visit <a href="?debug=1&test=1">?debug=1&test=1</a> to force a test row.</div>`;
+      if (hasD1 && schemaReady && totalLogs === 0) {
+        html += `<div class="info"><strong>ℹ️ No logs yet.</strong>
+          Only requests to <a href="/${escapeHtml(pathToken)}?nocache=1"><code>/${escapeHtml(pathToken)}?nocache=1</code></a> create log rows — visiting <code>/credit/${escapeHtml(pathToken)}</code> does not.<br>
+          Visit <a href="/${escapeHtml(pathToken)}?nocache=1">the playlist URL</a> now (cache-busted), then come back here. Or use <a href="/${escapeHtml(pathToken)}?debug=1&test=1">?debug=1&test=1</a> to force a test row.</div>`;
       }
 
       html += `<div class="summary">
   <div>Backend: ${hasD1 && schemaReady
     ? '<span class="badge-ok">D1 (global) ✓</span>'
-    : (!hasD1 ? '<span class="badge-bad">Cache API (per‑colo) — D1 not bound</span>' : '<span class="badge-bad">D1 bound but schema not ready</span>')}</div>
+    : '<span class="badge-bad">' + (hasD1 ? 'D1 bound, schema not ready' : 'D1 not bound') + '</span>'}</div>
   <div>Rendered from colo: <code>${escapeHtml(request.cf?.colo || '?')}</code></div>
   <div>Today's logged requests: <span class="count">${counts[0]}</span> / Unlimited</div>
-  <div style="margin-top:8px;"><a href="?debug=1">Open debug JSON</a> · <a href="?debug=1&test=1">Insert test row</a></div>
+  <div>7‑day total logged calls: <span class="count">${totalLogs}</span></div>
+  <div style="margin-top:8px;">
+    <a href="/${escapeHtml(pathToken)}?nocache=1">Hit playlist (cache-busted)</a> ·
+    <a href="?debug=1">Debug JSON</a> ·
+    <a href="?debug=1&test=1">Insert test row</a> ·
+    <a href="?debug=1&raw=1">Raw D1 rows</a>
+  </div>
+  <div class="generated">Generated: ${generatedAt} · <a href="">Refresh</a></div>
 </div>
 <h2>Last 7 Days</h2>`;
 
-      let totalLogs = 0;
       for (let i = 0; i < dates.length; i++) {
         const date = dates[i];
         const logs = allLogs[i] || [];
-        totalLogs += counts[i];
         html += `<div class="day"><h3>Date - ${date} - <span class="count">${counts[i]} calls</span></h3>`;
         if (logs.length === 0) {
           html += `<div class="entry empty">No calls recorded.</div>`;
@@ -493,7 +548,6 @@ export default {
         }
         html += `</div>`;
       }
-      html += `<div class="summary" style="margin-top:16px;"><div>7‑day total logged calls: <span class="count">${totalLogs}</span></div></div>`;
       html += `</body></html>`;
 
       return new Response(html, {
@@ -501,7 +555,8 @@ export default {
         headers: {
           "Content-Type": "text/html; charset=utf-8",
           "Access-Control-Allow-Origin": "*",
-          "Cache-Control": "no-store"
+          "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+          "CDN-Cache-Control": "no-store"
         }
       });
     }
@@ -547,13 +602,7 @@ export default {
 
     const ts = Date.now();
     const [
-      mbCookie,
-      slivCookie,
-      standardData,
-      dictUrlsData,
-      catchupData,
-      jioStbData,
-      customPlaylistData
+      mbCookie, slivCookie, standardData, dictUrlsData, catchupData, jioStbData, customPlaylistData
     ] = await Promise.all([
       getCachedCookie("https://ayushsupercompro.onrender.com/cookies/mb.json", "https://dummy.internal.local/cookie/mb", "__hdnea__="),
       getSonyLivCookie(),
@@ -740,6 +789,7 @@ export default {
         responseHeaders["Pragma"] = "no-cache";
         responseHeaders["Expires"] = "0";
     }
+    responseHeaders["CDN-Cache-Control"] = "no-store";
 
     return new Response(m3u, { headers: responseHeaders });
   }
