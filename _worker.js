@@ -1,14 +1,17 @@
+// ─── Diagnostic state (module-scope, resets on isolate restart) ───
 let schemaReady = false;
+let schemaError = null;
+let lastInsertOk = null;
+let lastInsertError = null;
 
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const pathParts = url.pathname.substring(1).split('/');
-    
+
     let pathToken = "";
     let action = "";
 
-    // Route logic
     if (pathParts[0] === 'credit') {
         action = 'credit';
         pathToken = pathParts[1];
@@ -28,7 +31,7 @@ export default {
       const accessReq = await fetch("https://raw.githubusercontent.com/Ayush8481Lab/Sar/refs/heads/main/app/data/access.json", {
         headers: { 'User-Agent': 'Mozilla/5.0' }
       });
-      const accessData = await accessReq.json();      
+      const accessData = await accessReq.json();
       if (!accessData.tokens || !accessData.tokens.includes(pathToken)) {
         return new Response("Unauthorized: Invalid Token.", { status: 401 });
       }
@@ -37,29 +40,34 @@ export default {
     }
 
     // ============================================================
-    // D1 SCHEMA INIT (idempotent, once per isolate)
+    // D1 BINDING CHECK + SCHEMA INIT (robust, per-statement)
     // ============================================================
     const hasD1 = !!(env && env.LOGS_DB);
     if (hasD1 && !schemaReady) {
       try {
-        await env.LOGS_DB.exec(`
-          CREATE TABLE IF NOT EXISTS logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            token TEXT NOT NULL,
-            date TEXT NOT NULL,
-            ts TEXT NOT NULL,
-            ua TEXT,
-            ip TEXT,
-            geo TEXT,
-            action TEXT,
-            colo TEXT
-          );
-          CREATE INDEX IF NOT EXISTS idx_logs_token_date ON logs(token, date);
-          CREATE INDEX IF NOT EXISTS idx_logs_date ON logs(date);
-        `);
+        await env.LOGS_DB.prepare(
+          "CREATE TABLE IF NOT EXISTS logs (" +
+          "id INTEGER PRIMARY KEY AUTOINCREMENT," +
+          "token TEXT NOT NULL," +
+          "date TEXT NOT NULL," +
+          "ts TEXT NOT NULL," +
+          "ua TEXT," +
+          "ip TEXT," +
+          "geo TEXT," +
+          "action TEXT," +
+          "colo TEXT" +
+          ")"
+        ).run();
+        await env.LOGS_DB.prepare(
+          "CREATE INDEX IF NOT EXISTS idx_logs_token_date ON logs(token, date)"
+        ).run();
+        await env.LOGS_DB.prepare(
+          "CREATE INDEX IF NOT EXISTS idx_logs_date ON logs(date)"
+        ).run();
         schemaReady = true;
+        schemaError = null;
       } catch (e) {
-        // Table may already exist, or DB not yet ready — retried next request
+        schemaError = String(e && e.message ? e.message : e);
       }
     }
 
@@ -85,12 +93,12 @@ export default {
     const escapeHtml = (s) => String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
     // ============================================================
-    // LOG READ / WRITE HELPERS (D1 preferred, cache fallback)
+    // LOG READ / WRITE
     // ============================================================
     const cacheKey = (token, date) => `https://dummy.internal.local/logs/${token}/${date}`;
 
     const getLogsForDate = async (token, dateStr) => {
-      if (hasD1) {
+      if (hasD1 && schemaReady) {
         try {
           const res = await env.LOGS_DB.prepare(
             "SELECT ts, ua, ip, geo, action, colo FROM logs WHERE token = ? AND date = ? ORDER BY id DESC LIMIT 1000"
@@ -100,7 +108,6 @@ export default {
           return [];
         }
       }
-      // Cache fallback — stored in insertion (oldest-first) order, reverse for newest-first
       try {
         const res = await caches.default.match(new Request(cacheKey(token, dateStr)));
         if (res) return (await res.json()).reverse();
@@ -109,7 +116,7 @@ export default {
     };
 
     const appendLog = async (token, dateStr, entry) => {
-      if (hasD1) {
+      if (hasD1 && schemaReady) {
         try {
           const cutoff = new Date(Date.now() + 19800000 - 8 * 86400000).toISOString().split('T')[0];
           await env.LOGS_DB.batch([
@@ -118,15 +125,21 @@ export default {
             ).bind(token, dateStr, entry.ts, entry.ua, entry.ip, entry.geo, entry.action, entry.colo),
             env.LOGS_DB.prepare("DELETE FROM logs WHERE date < ?").bind(cutoff)
           ]);
+          lastInsertOk = Date.now();
+          lastInsertError = null;
         } catch (e) {
-          // Log lost on D1 failure — acceptable for logging
+          lastInsertError = String(e && e.message ? e.message : e);
+          // If table is gone, force schema retry on next request
+          if (lastInsertError.toLowerCase().includes('no such table')) {
+            schemaReady = false;
+          }
         }
         return;
       }
       // Cache fallback (per-colo, capped at 1000/day)
       try {
         const logs = await getLogsForDate(token, dateStr);
-        logs.unshift(entry); // newest first
+        logs.unshift(entry);
         const capped = logs.slice(0, 1000);
         await caches.default.put(
           new Request(cacheKey(token, dateStr)),
@@ -139,7 +152,6 @@ export default {
 
     // ============================================================
     // IP → "[AS45609 Bharti Airtel Limited, Lucknow, Uttar Pradesh, IN]"
-    // Cloudflare's request.cf is authoritative and always populated.
     // ============================================================
     const buildGeoFromCF = (cf) => {
       if (!cf) return '';
@@ -204,7 +216,7 @@ export default {
       const req = new Request(cacheKeyUrl);
       const cachedRes = await cache.match(req);
       if (cachedRes) return await cachedRes.text();
-      
+
       try {
           const res = await fetch(fetchUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
           if (res.ok) {
@@ -224,7 +236,7 @@ export default {
                       const expTimestamp = parseInt(match[1], 10);
                       const currentSec = Math.floor(Date.now() / 1000);
                       const ttl = (expTimestamp - 3000) - currentSec;
-                      
+
                       if (ttl > 0) {
                           ctx.waitUntil(cache.put(req, new Response(cookieStr, { headers: { "Cache-Control": `max-age=${ttl}` } })));
                       }
@@ -255,7 +267,7 @@ export default {
           if (res.ok) {
               const data = await res.json();
               const videoUrl = data?.resultObj?.videoURL || "";
-              
+
               const match = /hdnea=(exp=\d+~acl=[^~]+~.*?hmac=[a-f0-9]+)/.exec(videoUrl);
               if (match) {
                   const cookieStr = "hdnea=" + match[1];
@@ -263,11 +275,11 @@ export default {
                   if (expMatch && expMatch[1]) {
                       const expTimestamp = parseInt(expMatch[1], 10);
                       const currentSec = Math.floor(Date.now() / 1000);
-                      const ttl = (expTimestamp - 3000) - currentSec; 
-                      
+                      const ttl = (expTimestamp - 3000) - currentSec;
+
                       if (ttl > 0) {
                           ctx.waitUntil(cache.put(req, new Response(cookieStr, { headers: { "Cache-Control": `max-age=${ttl}` } })));
-                          
+
                           const nextNextId = (nextId === "1090542909") ? "1090545339" : "1090542909";
                           ctx.waitUntil(cache.put(idReq, new Response(nextNextId, { headers: { "Cache-Control": `max-age=31536000` } })));
                       }
@@ -280,14 +292,14 @@ export default {
     };
 
     // ============================================================
-    // COUNT (D1 → COUNT(*), cache → stored counter)
+    // COUNT
     // ============================================================
     const cache = caches.default;
     const rlCacheUrl = new URL(`https://dummy.internal.local/ratelimit/${pathToken}/${istDateString}`);
     const rlRequest = new Request(rlCacheUrl.href);
 
     let reqCount = 0;
-    if (hasD1) {
+    if (hasD1 && schemaReady) {
       try {
         const r = await env.LOGS_DB.prepare(
           "SELECT COUNT(*) as c FROM logs WHERE token = ? AND date = ?"
@@ -300,10 +312,27 @@ export default {
     }
 
     // ============================================================
-    // DEBUG ENDPOINT — /<token>?debug=1
+    // DEBUG ENDPOINT — /<token>?debug=1  (or with &test=1)
     // ============================================================
     if (isDebug) {
+      let testResult = null;
+      if (url.searchParams.get('test') === '1' && hasD1) {
+        try {
+          await env.LOGS_DB.prepare(
+            "INSERT INTO logs (token, date, ts, ua, ip, geo, action, colo) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+          ).bind(
+            pathToken, istDateString,
+            'TEST ENTRY ' + new Date().toISOString(),
+            'TEST-UA', 'TEST-IP', 'TEST-GEO', 'test', request.cf?.colo || '?'
+          ).run();
+          testResult = { ok: true, message: "Test row inserted. Reload /credit/<token> to see it." };
+        } catch (e) {
+          testResult = { ok: false, error: String(e && e.message ? e.message : e) };
+        }
+      }
+
       const todayLogs = await getLogsForDate(pathToken, istDateString);
+
       return new Response(JSON.stringify({
         ok: true,
         colo: request.cf?.colo || 'unknown',
@@ -312,11 +341,24 @@ export default {
         action: action || 'playlist',
         isBrowser,
         ua: uaRaw,
-        backend: hasD1 ? 'd1' : 'cache',
+        hasD1,
+        schemaReady,
+        schemaError,
+        lastInsertError,
+        lastInsertOk: lastInsertOk ? new Date(lastInsertOk + 19800000).toISOString().replace('T',' ').substring(0,19) + ' IST' : null,
         reqCount,
         todayLogsCount: todayLogs.length,
         todayLast5: todayLogs.slice(0, 5),
-        warning: hasD1 ? null : 'D1 NOT BOUND — logs are edge-local and may not appear from other colos. Bind a D1 database as LOGS_DB for global logs.'
+        testResult,
+        logKey: `logs/${pathToken}/${istDateString}`,
+        warning: !hasD1
+          ? 'D1 NOT BOUND — logs go to per-colo Cache API only. Bind a D1 database as LOGS_DB.'
+          : (!schemaReady
+              ? 'D1 BOUND but schema not ready. See schemaError above.'
+              : null),
+        hint: hasD1 && schemaReady && todayLogs.length === 0
+          ? 'D1 ready but 0 logs today. Hit the playlist URL (NOT /credit) to create a log, or visit ?debug=1&test=1 to force a test insert.'
+          : null
       }, null, 2), {
         headers: { "Content-Type": "application/json", "Cache-Control": "no-store" }
       });
@@ -339,9 +381,8 @@ export default {
         dates.push(new Date(today.getTime() - i * 86400000).toISOString().split('T')[0]);
       }
 
-      // Fetch logs for all 7 days in parallel
       let allLogs = [];
-      if (hasD1) {
+      if (hasD1 && schemaReady) {
         try {
           const results = await env.LOGS_DB.batch(
             dates.map(d => env.LOGS_DB.prepare(
@@ -356,8 +397,7 @@ export default {
         allLogs = await Promise.all(dates.map(d => getLogsForDate(pathToken, d)));
       }
 
-      // Daily counts — derived from logs when D1, else from cache counter (today only)
-      const counts = dates.map((d, i) => (i === 0 && !hasD1) ? Math.max(reqCount, allLogs[i].length) : allLogs[i].length);
+      const counts = dates.map((d, i) => (i === 0 && !(hasD1 && schemaReady)) ? Math.max(reqCount, allLogs[i].length) : allLogs[i].length);
 
       let html = `<!DOCTYPE html>
 <html>
@@ -386,26 +426,45 @@ export default {
   code { background: #21262d; padding: 2px 6px; border-radius: 4px; color: #c9d1d9; }
   .empty { color: #6e7681; font-style: italic; }
   .warn { background: #3d1d1d; border: 1px solid #f85149; color: #ff7b72; padding: 14px 16px; border-radius: 8px; margin-bottom: 16px; line-height: 1.6; }
+  .info { background: #1d2d3d; border: 1px solid #58a6ff; color: #79c0ff; padding: 14px 16px; border-radius: 8px; margin-bottom: 16px; line-height: 1.6; }
   .ok { color: #7ee787; }
   .badge-ok { background:#1a3a1a; border:1px solid #2ea043; color:#7ee787; padding:2px 8px; border-radius:6px; font-size:12px; }
   .badge-bad { background:#3d1d1d; border:1px solid #f85149; color:#ff7b72; padding:2px 8px; border-radius:6px; font-size:12px; }
+  a { color: #58a6ff; }
 </style>
 </head>
 <body>
 <h1>Usage Logs · <code>${escapeHtml(pathToken)}</code></h1>`;
 
+      // ─── Diagnostic banner stack ───
       if (!hasD1) {
-        html += `<div class="warn"><strong>⚠️ D1 NOT BOUND — logs are stored per‑colo in the Cache API.</strong><br>
-        Requests hitting a <em>different</em> Cloudflare colo (e.g. a Vercel proxy in another region) will <strong>NOT</strong> appear here.<br>
-        <strong>Fix:</strong> create a D1 database, bind it as <code>LOGS_DB</code> in Worker settings, redeploy. Visit <code>/${escapeHtml(pathToken)}?debug=1</code> to verify.</div>`;
+        html += `<div class="warn"><strong>⚠️ D1 NOT BOUND — logs are stored per-colo in the Cache API.</strong><br>
+        Requests hitting a <em>different</em> Cloudflare colo will NOT appear here.<br>
+        <strong>Fix:</strong> create a D1 database <code>ayush-logs</code>, bind it to this Pages project as <code>LOGS_DB</code> (Settings → Functions → Bindings → D1 database), then redeploy.<br>
+        Verify with <a href="?debug=1">?debug=1</a>.</div>`;
+      } else if (!schemaReady) {
+        html += `<div class="warn"><strong>⚠️ D1 bound but schema creation failed.</strong><br>
+        <strong>Error:</strong> <code>${escapeHtml(schemaError || 'unknown')}</code><br>
+        Try <a href="?debug=1">?debug=1</a> — the error will be shown there and schema will be re-attempted.</div>`;
+      } else if (lastInsertError) {
+        html += `<div class="warn"><strong>⚠️ D1 bound &amp; schema ready, but the last insert failed.</strong><br>
+        <strong>Error:</strong> <code>${escapeHtml(lastInsertError)}</code><br>
+        Try <a href="?debug=1&test=1">?debug=1&test=1</a> to force a test insert and see the error.</div>`;
+      }
+
+      if (hasD1 && schemaReady && counts[0] === 0) {
+        html += `<div class="info"><strong>ℹ️ D1 is bound and working, but no logs exist for today.</strong><br>
+        Only requests to the <strong>playlist URL</strong> (<code>/${escapeHtml(pathToken)}</code>) create logs — visiting <code>/credit/${escapeHtml(pathToken)}</code> does not.<br>
+        Open <a href="/${escapeHtml(pathToken)}">/${escapeHtml(pathToken)}</a> in a player, or visit <a href="?debug=1&test=1">?debug=1&test=1</a> to force a test row.</div>`;
       }
 
       html += `<div class="summary">
-  <div>Backend: ${hasD1
+  <div>Backend: ${hasD1 && schemaReady
     ? '<span class="badge-ok">D1 (global) ✓</span>'
-    : '<span class="badge-bad">Cache API (per‑colo)</span>'}</div>
+    : (!hasD1 ? '<span class="badge-bad">Cache API (per‑colo) — D1 not bound</span>' : '<span class="badge-bad">D1 bound but schema not ready</span>')}</div>
   <div>Rendered from colo: <code>${escapeHtml(request.cf?.colo || '?')}</code></div>
   <div>Today's logged requests: <span class="count">${counts[0]}</span> / Unlimited</div>
+  <div style="margin-top:8px;"><a href="?debug=1">Open debug JSON</a> · <a href="?debug=1&test=1">Insert test row</a></div>
 </div>
 <h2>Last 7 Days</h2>`;
 
@@ -458,17 +517,17 @@ export default {
       let startSec = parseInt(start, 10);
       let endSec = parseInt(end, 10);
       const currentSec = Math.floor(Date.now() / 1000);
-      
+
       if (endSec > currentSec) endSec = currentSec;
-      if (startSec > endSec) startSec = endSec - 3600; 
+      if (startSec > endSec) startSec = endSec - 3600;
 
       let finalCatchupUrl = targetUrl;
       const getUTCString = (utcSeconds) => {
-        const d = new Date(utcSeconds * 1000); 
+        const d = new Date(utcSeconds * 1000);
         const pad = (n) => (n < 10 ? '0' + n : n);
         return `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}`;
       };
-      
+
       finalCatchupUrl += `?begin=${getUTCString(startSec)}&end=${getUTCString(endSec)}`;
 
       const cpCookie = await getCachedCookie("https://ayushsupercompro.onrender.com/cookies/cp.json", "https://dummy.internal.local/cookie/cp", "__hdnea__=");
@@ -485,7 +544,7 @@ export default {
         return await res.json();
       } catch (err) { return null; }
     };
-    
+
     const ts = Date.now();
     const [
       mbCookie,
@@ -506,7 +565,7 @@ export default {
     ]);
 
     let masterToken = mbCookie || "";
-    
+
     const urlsDict = new Map();
     if (dictUrlsData) {
       const parseUrls = (res, isFailed) => {
@@ -537,27 +596,27 @@ export default {
 
     let rawChannels = [];
     if (standardData && Array.isArray(standardData)) rawChannels.push(...standardData);
-   
+
     let finalChannels = [];
     rawChannels.forEach(c => {
       const cid = String(c.id || c.channel_id || "");
       const cname = String(c.name || "").toLowerCase();
       if (c.stream_url && !c.url) c.url = c.stream_url;
       if (c.key_id && !c.keyId) c.keyId = c.key_id;
-      
+
       if (c.url && c.url.includes('jiotvpllive.cdn.jio.com')) {
           if (jioStbDict.has(cid)) c.url = jioStbDict.get(cid);
       }
 
       const overrideUrl = urlsDict.get(cid) || urlsDict.get(cname);
       if (overrideUrl) c.url = overrideUrl;
-      
+
       let finalUrl = c.url || "";
-      
+
       if (finalUrl.includes('dishmt.slivcdn.com')) {
           c.isSonyLiv = true;
           if (slivCookie) finalUrl += (finalUrl.includes('?') ? '&' : '?') + slivCookie;
-      } 
+      }
       else if (masterToken && finalUrl.includes('.jio.com') && !finalUrl.includes('st=') && !finalUrl.includes('hdnea')) {
           const cleanToken = masterToken.startsWith('?') ? masterToken.substring(1) : masterToken;
           finalUrl = finalUrl + (finalUrl.includes('?') ? '&' : '?') + cleanToken;
@@ -573,13 +632,13 @@ export default {
     if (customPlaylistData && Array.isArray(customPlaylistData) && customPlaylistData.length > 0) {
         const channelMap = new Map();
         finalChannels.forEach(c => channelMap.set(String(c.id || c.channel_id), c));
-        
+
         const sortedChannels = [];
         customPlaylistData.forEach(item => {
             const cid = String(item.Id);
             if (channelMap.has(cid)) {
                 const matchedChannel = { ...channelMap.get(cid) };
-                if (item.Cat) matchedChannel.category = item.Cat; 
+                if (item.Cat) matchedChannel.category = item.Cat;
                 sortedChannels.push(matchedChannel);
             }
         });
@@ -588,21 +647,21 @@ export default {
 
     // 7. Generate Final M3U Playlist
     let m3u = `#EXTM3U x-tvg-url="https://epg.ayush848694.workers.dev/${pathToken}"\n\n`;
-    
+
     finalChannels.forEach(c => {
       const name = (c.name || "Unknown Channel").replace(/"/g, '');
       const group = c.category || c.group || c.group_title || "Others";
-      
+
       let extinf = `#EXTINF:-1 tvg-id="${c.id || ''}" tvg-name="${name}" tvg-logo="${c.logo || ''}" group-title="${group}"`;
 
       if (c.isSonyLiv) {
           const parts = c.url.split('?');
           const baseUrl = parts[0];
           const queryParams = parts[1] || '';
-          
+
           const catchupBase = baseUrl.replace('master.m3u8', 'master-archive.m3u8');
           const catchupSource = `${catchupBase}?startTime={utc}&endTime={utcend}${queryParams ? '&' + queryParams : ''}`;
-          
+
           extinf += ` catchup="default" catchup-days="8" catchup-source="${catchupSource}"`;
       } else {
           const catchupUrl = catchupDict.get(String(c.id));
@@ -612,7 +671,7 @@ export default {
               extinf += ` catchup="default" catchup-days="8" catchup-source="${catchupSource}"`;
           }
       }
-      
+
       m3u += `${extinf},${name}\n`;
 
       let licenseKey = "";
@@ -653,10 +712,10 @@ export default {
       } else {
         m3u += `${c.url}\n\n`;
       }
-    });    
+    });
 
-    // 8. Cache count increment (only when D1 is not bound — D1 count comes from COUNT(*))
-    if (!hasD1) {
+    // 8. Cache count increment (only when D1 not in use)
+    if (!(hasD1 && schemaReady)) {
       const nextCount = reqCount + 1;
       const nextMidnightIST = new Date(istDateObj);
       nextMidnightIST.setUTCHours(23, 59, 59, 999);
@@ -673,7 +732,7 @@ export default {
         "Content-Disposition": "attachment; filename=\"Ayush@8481.m3u\"",
         "Vary": "User-Agent, Accept, Sec-Fetch-Dest"
     };
-    
+
     if (isBrowser && !forceNoCache) {
         responseHeaders["Cache-Control"] = "public, max-age=259200";
     } else {
@@ -681,7 +740,7 @@ export default {
         responseHeaders["Pragma"] = "no-cache";
         responseHeaders["Expires"] = "0";
     }
-    
+
     return new Response(m3u, { headers: responseHeaders });
   }
 };
