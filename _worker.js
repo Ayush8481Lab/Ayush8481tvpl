@@ -34,8 +34,99 @@ export default {
       return new Response("Error validating access token.", { status: 500 });
     }
 
-    // --- Helper function for fetching and caching generic cookies ---
-    // Safely handles '__hdnea__=' formatting to prevent duplicates like '?hdnea=__hdnea__='
+    // ============================================================
+    // IST DATE / TIME + LOGGING HELPERS  (new)
+    // ============================================================
+    const nowMs = Date.now();
+    const istDateObj = new Date(nowMs + 19800000); // UTC -> IST (represented as fake UTC)
+    const istDateString = istDateObj.toISOString().split('T')[0];
+
+    const escapeHtml = (s) => String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+    // Read logs for a token/date. Prefers KV (global), falls back to Cache API.
+    const getLogsForDate = async (token, dateStr) => {
+      try {
+        if (env && env.LOGS_KV) {
+          const v = await env.LOGS_KV.get(`logs/${token}/${dateStr}`);
+          return v ? JSON.parse(v) : [];
+        }
+        const cache = caches.default;
+        const res = await cache.match(new Request(`https://dummy.internal.local/logs/${token}/${dateStr}`));
+        if (res) return await res.json();
+      } catch (e) {}
+      return [];
+    };
+
+    // Append a log entry (capped at 1000/day to keep storage bounded).
+    const appendLog = async (token, dateStr, entry) => {
+      const logs = await getLogsForDate(token, dateStr);
+      logs.push(entry);
+      if (logs.length > 1000) logs.splice(0, logs.length - 1000);
+      const body = JSON.stringify(logs);
+      try {
+        if (env && env.LOGS_KV) {
+          await env.LOGS_KV.put(`logs/${token}/${dateStr}`, body, { expirationTtl: 8 * 86400 });
+        } else {
+          const cache = caches.default;
+          await cache.put(
+            new Request(`https://dummy.internal.local/logs/${token}/${dateStr}`),
+            new Response(body, { headers: { "Cache-Control": `max-age=${8 * 86400}` } })
+          );
+        }
+      } catch (e) {}
+    };
+
+    // IP -> "[AS45609 Bharti Airtel Limited, Lucknow, Uttar Pradesh, IN]"
+    const lookupIP = async (ip) => {
+      if (!ip || ip === 'unknown' || ip === '::1' || ip.startsWith('127.') || ip === 'localhost') return '';
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 3000);
+      try {
+        const res = await fetch(`https://ipwho.is/${ip}`, {
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+          signal: controller.signal
+        });
+        clearTimeout(timer);
+        if (!res.ok) return '';
+        const data = await res.json();
+        if (!data.success) return '';
+        const asnNum = data.connection?.asn;
+        const asn = asnNum ? `AS${asnNum}` : '';
+        const org = data.connection?.org || data.connection?.isp || '';
+        const asnPart = [asn, org].filter(Boolean).join(' ');
+        const parts = [asnPart, data.city, data.region, data.country_code].filter(Boolean);
+        return parts.length ? `[${parts.join(', ')}]` : '';
+      } catch (e) {
+        clearTimeout(timer);
+        return '';
+      }
+    };
+
+    // Fire-and-forget logging. Skipped for the credit dashboard itself so
+    // that refreshing the page doesn't inflate your usage logs.
+    if (action !== 'credit') {
+      const clientIP = request.headers.get('cf-connecting-ip')
+        || (request.headers.get('x-forwarded-for') || '').split(',')[0].trim()
+        || request.headers.get('x-real-ip')
+        || 'unknown';
+      const ua = request.headers.get('user-agent') || 'Unknown';
+
+      ctx.waitUntil((async () => {
+        const geo = await lookupIP(clientIP);
+        const istNow = new Date(Date.now() + 19800000);
+        const tsStr = istNow.toISOString().replace('T', ' ').substring(0, 19) + ' IST';
+        await appendLog(pathToken, istDateString, {
+          ts: tsStr,
+          ua: ua,
+          ip: clientIP,
+          geo: geo
+        });
+      })());
+    }
+
+    // ============================================================
+    // --- Helper: generic cached cookie --- (unchanged)
+    // ============================================================
     const getCachedCookie = async (fetchUrl, cacheKeyUrl, prefix) => {
       const cache = caches.default;
       const req = new Request(cacheKeyUrl);
@@ -76,7 +167,9 @@ export default {
       return "";
     };
 
-    // --- Helper function for fetching, rotating, and caching SonyLiv cookies ---
+    // ============================================================
+    // --- Helper: SonyLiv rotating cookie --- (unchanged)
+    // ============================================================
     const getSonyLivCookie = async () => {
       const cache = caches.default;
       const req = new Request("https://dummy.internal.local/cookie/sonyliv");
@@ -118,9 +211,6 @@ export default {
     };
 
     // 2. Track Request Count (Rate Limits Removed)
-    const nowMs = Date.now();
-    const istDateObj = new Date(nowMs + 19800000); // UTC to IST shift
-    const istDateString = istDateObj.toISOString().split('T')[0]; 
     const rlCacheUrl = new URL(`https://dummy.internal.local/ratelimit/${pathToken}/${istDateString}`);
     const rlRequest = new Request(rlCacheUrl.href);
     const cache = caches.default;
@@ -131,12 +221,87 @@ export default {
       reqCount = parseInt(await cachedLimit.text(), 10) || 0;
     }
 
-    // 3. Credit Endpoint 
+    // ============================================================
+    // 3. Credit Endpoint — HTML dashboard with last-7-day logs
+    // ============================================================
     if (action === "credit") {
-        return new Response(`${reqCount} / Unlimited`, { 
-            status: 200, 
-            headers: { "Content-Type": "text/plain", "Access-Control-Allow-Origin": "*" } 
+
+      // Backward-compat: /credit/<token>?raw=1 -> plain text
+      if (url.searchParams.get('raw') === '1') {
+        return new Response(`${reqCount} / Unlimited`, {
+          status: 200,
+          headers: { "Content-Type": "text/plain", "Access-Control-Allow-Origin": "*" }
         });
+      }
+
+      // Build the list of 7 IST date strings (today -> 6 days ago)
+      const today = new Date(nowMs + 19800000);
+      const dates = [];
+      for (let i = 0; i < 7; i++) {
+        const d = new Date(today.getTime() - i * 86400000);
+        dates.push(d.toISOString().split('T')[0]);
+      }
+      const allLogs = await Promise.all(dates.map(d => getLogsForDate(pathToken, d)));
+
+      let html = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Usage Logs · ${escapeHtml(pathToken)}</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; background: #0d1117; color: #c9d1d9; padding: 20px; margin: 0; line-height: 1.5; }
+  h1 { color: #58a6ff; font-size: 22px; margin: 0 0 16px; }
+  h2 { color: #58a6ff; font-size: 18px; margin: 28px 0 12px; }
+  h3 { color: #79c0ff; font-size: 15px; margin: 0 0 10px; }
+  .summary { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px 16px; margin-bottom: 16px; }
+  .summary div { margin: 4px 0; }
+  .day { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px 16px; margin: 12px 0; }
+  .entry { font-size: 12.5px; padding: 6px 0; border-bottom: 1px solid #21262d; word-break: break-all; }
+  .entry:last-child { border-bottom: none; }
+  .ts { color: #79c0ff; }
+  .ua { color: #ffa657; }
+  .ip { color: #7ee787; }
+  .count { color: #ff7b72; font-weight: 600; }
+  code { background: #21262d; padding: 2px 6px; border-radius: 4px; color: #c9d1d9; }
+  .empty { color: #6e7681; font-style: italic; }
+</style>
+</head>
+<body>
+<h1>Usage Logs · <code>${escapeHtml(pathToken)}</code></h1>
+<div class="summary">
+  <div>Today's all requests (incl. credit views): <span class="count">${reqCount}</span> / Unlimited</div>
+  <div>Today's logged calls (excl. credit views): <span class="count">${(allLogs[0] || []).length}</span></div>
+</div>
+<h2>Last 7 Days</h2>`;
+
+      let totalLogs = 0;
+      for (let i = 0; i < dates.length; i++) {
+        const date = dates[i];
+        const logs = allLogs[i] || [];
+        totalLogs += logs.length;
+        html += `<div class="day"><h3>Date - ${date} - <span class="count">${logs.length} calls</span></h3>`;
+        if (logs.length === 0) {
+          html += `<div class="entry empty">No calls recorded.</div>`;
+        } else {
+          logs.slice().reverse().forEach(l => {
+            html += `<div class="entry"><span class="ts">${escapeHtml(l.ts)}</span> · <span class="ua">${escapeHtml(l.ua || 'Unknown')}</span> · <span class="ip">${escapeHtml(l.ip)} ${escapeHtml(l.geo || '')}</span></div>`;
+          });
+        }
+        html += `</div>`;
+      }
+      html += `<div class="summary" style="margin-top:16px;"><div>7-day total logged calls: <span class="count">${totalLogs}</span></div></div>`;
+      html += `</body></html>`;
+
+      return new Response(html, {
+        status: 200,
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store"
+        }
+      });
     }
 
     // 4. Catchup Redirect Handler (JioTV Catchup ONLY)
@@ -299,14 +464,6 @@ export default {
     finalChannels.forEach(c => {
       const name = (c.name || "Unknown Channel").replace(/"/g, '');
       const group = c.category || c.group || c.group_title || "Others";
-
-      // ---------------------------------------------------------------
-      // Per-channel ping URL (analytics/tracking)
-      // Format: https://44444.a14638521.workers.dev/{token}/{ChannelName}
-      // Injected as #EXTHTTP:{"ping": "..."} right after #EXTINF
-      // ---------------------------------------------------------------
-      const encodedChannelName = encodeURIComponent(name);
-      const pingUrl = `https://44444.a14638521.workers.dev/${pathToken}/${encodedChannelName}`;
       
       let extinf = `#EXTINF:-1 tvg-id="${c.id || ''}" tvg-name="${name}" tvg-logo="${c.logo || ''}" group-title="${group}"`;
 
@@ -333,15 +490,8 @@ export default {
       
       m3u += `${extinf},${name}\n`;
 
-      // Inject per-channel ping URL as EXTHTTP JSON
-      m3u += `#EXTHTTP:{"ping":"${pingUrl}"}\n`;
-
       // ---------------------------------------------------------------
-      // Apply DRM configurations (UPDATED: supports multiple formats)
-      //   1. c.licenseurl -> Widevine license URL (com.widevine.alpha)
-      //   2. c.license    -> ClearKey JWK JSON string (multi-key, preferred)
-      //   3. c.keys[]     -> array of "kid:key" strings (multi-key)
-      //   4. c.keyId + c.key -> legacy single key "kid:key"
+      // Apply DRM configurations (supports multiple formats)
       // ---------------------------------------------------------------
       let licenseKey = "";
       let licenseType = "clearkey";
