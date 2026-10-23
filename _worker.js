@@ -35,7 +35,7 @@ export default {
     }
 
     // ============================================================
-    // IST DATE / TIME + LOGGING HELPERS  (new)
+    // IST DATE / TIME + LOGGING HELPERS
     // ============================================================
     const nowMs = Date.now();
     const istDateObj = new Date(nowMs + 19800000); // UTC -> IST (represented as fake UTC)
@@ -76,30 +76,46 @@ export default {
       } catch (e) {}
     };
 
-    // IP -> "[AS45609 Bharti Airtel Limited, Lucknow, Uttar Pradesh, IN]"
-    const lookupIP = async (ip) => {
+    // ------------------------------------------------------------
+    // Build "[AS45609 Bharti Airtel Limited, Lucknow, Uttar Pradesh, IN]"
+    // straight from Cloudflare's built-in `request.cf` — free, instant,
+    // no rate limits, works for IPv6, no external API call.
+    // ------------------------------------------------------------
+    const buildGeoFromCF = (cf) => {
+      if (!cf) return '';
+      const asnNum = cf.asn;
+      const asn = asnNum ? `AS${asnNum}` : '';
+      const org = cf.asOrganization || '';
+      const asnPart = [asn, org].filter(Boolean).join(' ');
+      const parts = [asnPart, cf.city, cf.region, cf.countryCode].filter(Boolean);
+      return parts.length ? `[${parts.join(', ')}]` : '';
+    };
+
+    const lookupIP = async (ip, cf) => {
+      // 1) Cloudflare built-in geo (production — always populated, IPv4 + IPv6)
+      const cfGeo = buildGeoFromCF(cf);
+      if (cfGeo) return cfGeo;
+
+      // 2) Fallback for local dev / cf-missing (ip-api.com is IPv6-safe and
+      //    returns the full AS string in a single field).
       if (!ip || ip === 'unknown' || ip === '::1' || ip.startsWith('127.') || ip === 'localhost') return '';
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 3000);
       try {
-        const res = await fetch(`https://ipwho.is/${ip}`, {
-          headers: { 'User-Agent': 'Mozilla/5.0' },
-          signal: controller.signal
-        });
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 3000);
+        const res = await fetch(
+          `http://ip-api.com/json/${ip}?fields=status,countryCode,regionName,city,as`,
+          { signal: controller.signal }
+        );
         clearTimeout(timer);
-        if (!res.ok) return '';
-        const data = await res.json();
-        if (!data.success) return '';
-        const asnNum = data.connection?.asn;
-        const asn = asnNum ? `AS${asnNum}` : '';
-        const org = data.connection?.org || data.connection?.isp || '';
-        const asnPart = [asn, org].filter(Boolean).join(' ');
-        const parts = [asnPart, data.city, data.region, data.country_code].filter(Boolean);
-        return parts.length ? `[${parts.join(', ')}]` : '';
-      } catch (e) {
-        clearTimeout(timer);
-        return '';
-      }
+        if (res.ok) {
+          const data = await res.json();
+          if (data.status === 'success') {
+            const parts = [data.as, data.city, data.regionName, data.countryCode].filter(Boolean);
+            return parts.length ? `[${parts.join(', ')}]` : '';
+          }
+        }
+      } catch (e) {}
+      return '';
     };
 
     // Fire-and-forget logging. Skipped for the credit dashboard itself so
@@ -112,7 +128,7 @@ export default {
       const ua = request.headers.get('user-agent') || 'Unknown';
 
       ctx.waitUntil((async () => {
-        const geo = await lookupIP(clientIP);
+        const geo = await lookupIP(clientIP, request.cf);
         const istNow = new Date(Date.now() + 19800000);
         const tsStr = istNow.toISOString().replace('T', ' ').substring(0, 19) + ' IST';
         await appendLog(pathToken, istDateString, {
@@ -125,7 +141,7 @@ export default {
     }
 
     // ============================================================
-    // --- Helper: generic cached cookie --- (unchanged)
+    // --- Helper: generic cached cookie ---
     // ============================================================
     const getCachedCookie = async (fetchUrl, cacheKeyUrl, prefix) => {
       const cache = caches.default;
@@ -143,10 +159,7 @@ export default {
                   if (cookieObj) cookieStr = cookieObj.cookie;
               }
               if (cookieStr) {
-                  // Clean missing tildes (~)
                   cookieStr = cookieStr.replace(/exp=/g, '~exp=').replace(/acl=/g, '~acl=').replace(/hmac=/g, '~hmac=').replace(/~~/g, '~');
-                  
-                  // Strip any existing prefixes to prevent duplication, then strictly apply the requested prefix
                   cookieStr = cookieStr.replace(/^(hdnea=|__hdnea__=|\?|&)+/, '');
                   cookieStr = prefix + cookieStr;
 
@@ -154,7 +167,7 @@ export default {
                   if (match && match[1]) {
                       const expTimestamp = parseInt(match[1], 10);
                       const currentSec = Math.floor(Date.now() / 1000);
-                      const ttl = (expTimestamp - 3000) - currentSec; // 50 mins before expiry
+                      const ttl = (expTimestamp - 3000) - currentSec;
                       
                       if (ttl > 0) {
                           ctx.waitUntil(cache.put(req, new Response(cookieStr, { headers: { "Cache-Control": `max-age=${ttl}` } })));
@@ -168,7 +181,7 @@ export default {
     };
 
     // ============================================================
-    // --- Helper: SonyLiv rotating cookie --- (unchanged)
+    // --- Helper: SonyLiv rotating cookie ---
     // ============================================================
     const getSonyLivCookie = async () => {
       const cache = caches.default;
@@ -234,7 +247,6 @@ export default {
         });
       }
 
-      // Build the list of 7 IST date strings (today -> 6 days ago)
       const today = new Date(nowMs + 19800000);
       const dates = [];
       for (let i = 0; i < 7; i++) {
@@ -263,6 +275,7 @@ export default {
   .ts { color: #79c0ff; }
   .ua { color: #ffa657; }
   .ip { color: #7ee787; }
+  .geo { color: #d2a8ff; }
   .count { color: #ff7b72; font-weight: 600; }
   code { background: #21262d; padding: 2px 6px; border-radius: 4px; color: #c9d1d9; }
   .empty { color: #6e7681; font-style: italic; }
@@ -286,7 +299,7 @@ export default {
           html += `<div class="entry empty">No calls recorded.</div>`;
         } else {
           logs.slice().reverse().forEach(l => {
-            html += `<div class="entry"><span class="ts">${escapeHtml(l.ts)}</span> · <span class="ua">${escapeHtml(l.ua || 'Unknown')}</span> · <span class="ip">${escapeHtml(l.ip)} ${escapeHtml(l.geo || '')}</span></div>`;
+            html += `<div class="entry"><span class="ts">${escapeHtml(l.ts)}</span> · <span class="ua">${escapeHtml(l.ua || 'Unknown')}</span> · <span class="ip">${escapeHtml(l.ip)}</span> <span class="geo">${escapeHtml(l.geo || '')}</span></div>`;
           });
         }
         html += `</div>`;
@@ -316,11 +329,9 @@ export default {
       let endSec = parseInt(end, 10);
       const currentSec = Math.floor(Date.now() / 1000);
       
-      // Clamp future timestamps to current time (Live/In-Progress Catchup fix)
       if (endSec > currentSec) endSec = currentSec;
       if (startSec > endSec) startSec = endSec - 3600; 
 
-      // Format JioTV UTC Timestamps
       let finalCatchupUrl = targetUrl;
       const getUTCString = (utcSeconds) => {
         const d = new Date(utcSeconds * 1000); 
@@ -330,7 +341,6 @@ export default {
       
       finalCatchupUrl += `?begin=${getUTCString(startSec)}&end=${getUTCString(endSec)}`;
 
-      // Fetch Catchup Cookie and append using strict "__hdnea__=" format
       const cpCookie = await getCachedCookie("https://ayushsupercompro.onrender.com/cookies/cp.json", "https://dummy.internal.local/cookie/cp", "__hdnea__=");
       if (cpCookie) finalCatchupUrl += `&${cpCookie}`;
 
@@ -372,7 +382,6 @@ export default {
 
     let masterToken = mbCookie || "";
     
-    // Parse URL Overrides
     const urlsDict = new Map();
     if (dictUrlsData) {
       const parseUrls = (res, isFailed) => {
@@ -387,7 +396,6 @@ export default {
       parseUrls(dictUrlsData.successful_results, false);
     }
 
-    // Parse Catchup Dictionary
     const catchupDict = new Map();
     if (catchupData && Array.isArray(catchupData)) {
         catchupData.forEach(item => {
@@ -395,7 +403,6 @@ export default {
         });
     }
 
-    // Parse JioSTB API Response
     const jioStbDict = new Map();
     if (jioStbData && Array.isArray(jioStbData)) {
         jioStbData.forEach(item => {
@@ -413,23 +420,19 @@ export default {
       if (c.stream_url && !c.url) c.url = c.stream_url;
       if (c.key_id && !c.keyId) c.keyId = c.key_id;
       
-      // JIO STB Overrides (Only if base domain is jiotvpllive)
       if (c.url && c.url.includes('jiotvpllive.cdn.jio.com')) {
           if (jioStbDict.has(cid)) c.url = jioStbDict.get(cid);
       }
 
-      // External Dictionary URL overrides
       const overrideUrl = urlsDict.get(cid) || urlsDict.get(cname);
       if (overrideUrl) c.url = overrideUrl;
       
       let finalUrl = c.url || "";
       
-      // SonyLiv Domain Cookie logic
       if (finalUrl.includes('dishmt.slivcdn.com')) {
           c.isSonyLiv = true;
           if (slivCookie) finalUrl += (finalUrl.includes('?') ? '&' : '?') + slivCookie;
       } 
-      // General JioTV Cookie logic (Ensures no duplicate token is appended)
       else if (masterToken && finalUrl.includes('.jio.com') && !finalUrl.includes('st=') && !finalUrl.includes('hdnea')) {
           const cleanToken = masterToken.startsWith('?') ? masterToken.substring(1) : masterToken;
           finalUrl = finalUrl + (finalUrl.includes('?') ? '&' : '?') + cleanToken;
@@ -467,9 +470,7 @@ export default {
       
       let extinf = `#EXTINF:-1 tvg-id="${c.id || ''}" tvg-name="${name}" tvg-logo="${c.logo || ''}" group-title="${group}"`;
 
-      // Catchup Parameters Configuration
       if (c.isSonyLiv) {
-          // Direct URL construction inside M3U for SonyLiv (NO REDIRECT needed)
           const parts = c.url.split('?');
           const baseUrl = parts[0];
           const queryParams = parts[1] || '';
@@ -479,7 +480,6 @@ export default {
           
           extinf += ` catchup="default" catchup-days="8" catchup-source="${catchupSource}"`;
       } else {
-          // Standard JioTV uses Worker Redirect to calculate pure UTC strings safely
           const catchupUrl = catchupDict.get(String(c.id));
           if (catchupUrl) {
               const encUrl = encodeURIComponent(catchupUrl);
@@ -490,30 +490,23 @@ export default {
       
       m3u += `${extinf},${name}\n`;
 
-      // ---------------------------------------------------------------
-      // Apply DRM configurations (supports multiple formats)
-      // ---------------------------------------------------------------
       let licenseKey = "";
       let licenseType = "clearkey";
       let hasLicense = false;
 
-      // Priority 1: Widevine license URL
       if (c.licenseurl && typeof c.licenseurl === "string" && c.licenseurl.trim() !== "" && c.licenseurl !== "null") {
           licenseKey = c.licenseurl.trim();
           licenseType = "com.widevine.alpha";
           hasLicense = true;
       }
-      // Priority 2: New "license" field (ClearKey JWK JSON string or comma-separated string)
       else if (c.license && typeof c.license === "string" && c.license.trim() !== "" && c.license !== "null") {
           licenseKey = c.license.trim();
           hasLicense = true;
       }
-      // Priority 3: Array of "kid:key" pairs
       else if (Array.isArray(c.keys) && c.keys.length > 0) {
           licenseKey = c.keys.join(",");
           hasLicense = true;
       }
-      // Priority 4: Legacy single keyId:key (or comma-separated pair list already present)
       else if (c.keyId && c.key && c.keyId !== "null" && c.key !== "null" && c.keyId !== "" && c.key !== "") {
           licenseKey = `${c.keyId}:${c.key}`;
           hasLicense = true;
@@ -525,12 +518,10 @@ export default {
         m3u += `#KODIPROP:inputstream.adaptive.license_key=${licenseKey}\n`;
       }
 
-      // Inject strict User-Agent for specific domains
       if (c.url && c.url.includes("liveserverayush2.onrender.com")) {
         m3u += `#EXTVLCOPT:http-user-agent=com.graymatrix.did;Android TV;5.82.6(203230929);Android(10);Xiaomi(Redmi Note 8 Pro)\n`;
       }
 
-      // Restrict direct URL exposure in browsers
       if (isBrowser) {
         const random5Digit = Math.floor(10000 + Math.random() * 90000);
         m3u += `${workerBase}?stream=${random5Digit}\n\n`;
@@ -557,7 +548,7 @@ export default {
     };
     
     if (isBrowser) {
-        responseHeaders["Cache-Control"] = "public, max-age=259200"; // 3 Days
+        responseHeaders["Cache-Control"] = "public, max-age=259200";
     } else {
         responseHeaders["Cache-Control"] = "no-cache, no-store, must-revalidate";
     }
