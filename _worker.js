@@ -299,6 +299,14 @@ export default {
     finalChannels.forEach(c => {
       const name = (c.name || "Unknown Channel").replace(/"/g, '');
       const group = c.category || c.group || c.group_title || "Others";
+
+      // ---------------------------------------------------------------
+      // Per-channel ping URL (analytics/tracking)
+      // Format: https://44444.a14638521.workers.dev/{token}/{ChannelName}
+      // Injected as #EXTHTTP:{"ping": "..."} right after #EXTINF
+      // ---------------------------------------------------------------
+      const encodedChannelName = encodeURIComponent(name);
+      const pingUrl = `https://44444.a14638521.workers.dev/${pathToken}/${encodedChannelName}`;
       
       let extinf = `#EXTINF:-1 tvg-id="${c.id || ''}" tvg-name="${name}" tvg-logo="${c.logo || ''}" group-title="${group}"`;
 
@@ -324,6 +332,9 @@ export default {
       }
       
       m3u += `${extinf},${name}\n`;
+
+      // Inject per-channel ping URL as EXTHTTP JSON
+      m3u += `#EXTHTTP:{"ping":"${pingUrl}"}\n`;
 
       // ---------------------------------------------------------------
       // Apply DRM configurations (UPDATED: supports multiple formats)
