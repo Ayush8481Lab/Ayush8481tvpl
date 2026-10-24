@@ -5,9 +5,14 @@ let lastInsertOk = null;
 let lastInsertError = null;
 
 // ============================================================
-// BLOCKED BROWSER PAGE (HTML)
+// BLOCKED / ERROR PAGE (shared by token-error + browser block)
 // ============================================================
-function buildBlockedPage({ asn, org, locationHtml, serverTime }) {
+function buildBlockedPage({ asn, org, locationHtml, serverTime, descHtml }) {
+  const desc = descHtml || `This content is <strong>not allowed in a web browser</strong>.<br>
+      <strong>Hint:</strong> Open this playlist URL in an IPTV player —
+      <span class="player-hint">TiviMate</span>
+      <span class="player-hint">OTT Navigator</span>
+      <span class="player-hint">VLC</span>`;
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -567,9 +572,9 @@ function buildBlockedPage({ asn, org, locationHtml, serverTime }) {
   }
 
   /* ============================================================
-     REQUESTED FROM INFO — pure blue palette (no green tint)
-     Values come from request.cf on the server side and are
-     frozen at the moment the request was received.
+     REQUESTED FROM INFO — pure light green (hacker style)
+     Values are server-injected from request.cf, frozen at the
+     moment the request was received.
   ============================================================ */
   .request-info {
     margin: 28px auto 0;
@@ -581,10 +586,11 @@ function buildBlockedPage({ asn, org, locationHtml, serverTime }) {
     font-size: clamp(11px, 2.6vw, 13px);
     line-height: 1.9;
     letter-spacing: .02em;
-    color: #dbeafe;
+    color: #4ade80;
     text-shadow:
-      0 1px 3px rgba(0,0,0,.95),
-      0 0 12px rgba(0,0,0,.85);
+      0 0 10px rgba(74, 222, 128, 0.55),
+      0 0 22px rgba(74, 222, 128, 0.25),
+      0 1px 3px rgba(0,0,0,.95);
     animation: infoIn .9s cubic-bezier(.16,1,.3,1) .35s both;
   }
 
@@ -595,19 +601,19 @@ function buildBlockedPage({ asn, org, locationHtml, serverTime }) {
 
   .request-info .ri-line { display: block; }
   .request-info .ri-asn {
-    color: #93c5fd;
+    color: #22c55e;
     font-weight: 800;
   }
   .request-info .ri-org {
-    color: #bfdbfe;
+    color: #4ade80;
     font-weight: 700;
   }
   .request-info .ri-loc {
-    color: #dbeafe;
+    color: #86efac;
     font-weight: 500;
   }
   .request-info .ri-time {
-    color: #60a5fa;
+    color: #22c55e;
     font-weight: 600;
     font-variant-numeric: tabular-nums;
   }
@@ -699,13 +705,7 @@ function buildBlockedPage({ asn, org, locationHtml, serverTime }) {
     <span class="error-badge"><span class="led"></span>403 · Forbidden</span>
     <div class="error-code">403</div>
     <h1 class="error-title">Access Denied</h1>
-    <p class="error-desc">
-      This content is <strong>not allowed in a web browser</strong>.<br>
-      <strong>Hint:</strong> Open this playlist URL in an IPTV player —
-      <span class="player-hint">TiviMate</span>
-      <span class="player-hint">OTT Navigator</span>
-      <span class="player-hint">VLC</span>
-    </p>
+    <p class="error-desc">${desc}</p>
 
     <div class="eq-stage" aria-hidden="true">
       <div class="eq" id="eq"></div>
@@ -816,7 +816,36 @@ export default {
     }
 
     // ============================================================
-    // 1. Verify Access Token
+    // SHARED HELPERS (moved up so token-error page can use them)
+    // ============================================================
+    const nowMs = Date.now();
+    const istDateObj = new Date(nowMs + 19800000);
+    const istDateString = istDateObj.toISOString().split('T')[0];
+    const escapeHtml = (s) => String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+    const buildBlockPageData = () => {
+      const asnStr = request.cf?.asn ? `AS${request.cf.asn}` : 'Unknown ASN';
+      const orgStr = request.cf?.asOrganization || 'Unknown Provider';
+      const cityStr = request.cf?.city || '';
+      const regionStr = request.cf?.region || '';
+      const countryStr = request.cf?.country || '';
+      let locStr = [cityStr, regionStr].filter(Boolean).join(', ');
+      if (!locStr && countryStr) locStr = countryStr;
+      const locationHtml = locStr ? `, <span class="ri-loc">${escapeHtml(locStr)}</span>` : '';
+
+      const istNow = new Date(nowMs + 19800000);
+      const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      const pad2 = (n) => String(n).padStart(2, '0');
+      const hh = istNow.getUTCHours();
+      const ampm = hh >= 12 ? 'pm' : 'am';
+      const h12 = hh % 12 || 12;
+      const serverTime = `${pad2(istNow.getUTCDate())} ${months[istNow.getUTCMonth()]} ${istNow.getUTCFullYear()}, ${pad2(h12)}:${pad2(istNow.getUTCMinutes())}:${pad2(istNow.getUTCSeconds())} ${ampm} IST`;
+
+      return { asn: escapeHtml(asnStr), org: escapeHtml(orgStr), locationHtml, serverTime };
+    };
+
+    // ============================================================
+    // 1. Verify Access Token — invalid token → same blocked page
     // ============================================================
     try {
       const accessReq = await fetch("https://raw.githubusercontent.com/Ayush8481Lab/Sar/refs/heads/main/app/data/access.json", {
@@ -824,7 +853,20 @@ export default {
       });
       const accessData = await accessReq.json();
       if (!accessData.tokens || !accessData.tokens.includes(pathToken)) {
-        return new Response("Unauthorized: Invalid Token.", { status: 401 });
+        const data = buildBlockPageData();
+        const html = buildBlockedPage({
+          ...data,
+          descHtml: 'You are <strong>not allowed</strong> access this content.<br>Please take permission from <strong>Developer</strong>.'
+        });
+        return new Response(html, {
+          status: 403,
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "CDN-Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff"
+          }
+        });
       }
     } catch (err) {
       return new Response("Error validating access token.", { status: 500 });
@@ -894,15 +936,6 @@ export default {
     const isBrowser = !isPlayerUA.test(uaLower) && ((secFetchDest === 'document') || acceptHeader.includes('text/html'));
     const forceNoCache = url.searchParams.get('nocache') === '1';
     const isDebug = url.searchParams.get('debug') === '1';
-
-    // ============================================================
-    // IST DATE / TIME
-    // ============================================================
-    const nowMs = Date.now();
-    const istDateObj = new Date(nowMs + 19800000);
-    const istDateString = istDateObj.toISOString().split('T')[0];
-
-    const escapeHtml = (s) => String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
     // ============================================================
     // LOG READ / WRITE
@@ -1377,36 +1410,11 @@ export default {
     }
 
     // ============================================================
-    // BLOCKED BROWSER PAGE
-    // Serves the error page for browser requests (unless ?nocache=1
-    // or ?allow=1). Time & location frozen at request moment.
+    // BLOCKED BROWSER PAGE (default player-hint message)
     // ============================================================
     if (isBrowser && !forceNoCache && !allowBypass) {
-      const asnStr = request.cf?.asn ? `AS${request.cf.asn}` : 'Unknown ASN';
-      const orgStr = request.cf?.asOrganization || 'Unknown Provider';
-      const cityStr = request.cf?.city || '';
-      const regionStr = request.cf?.region || '';
-      const countryStr = request.cf?.country || '';
-      let locStr = [cityStr, regionStr].filter(Boolean).join(', ');
-      if (!locStr && countryStr) locStr = countryStr;
-      const locationHtml = locStr ? `, <span class="ri-loc">${escapeHtml(locStr)}</span>` : '';
-
-      // Freeze IST time at the exact moment this request arrived.
-      const istNow = new Date(nowMs + 19800000);
-      const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-      const pad2 = (n) => String(n).padStart(2, '0');
-      const hh = istNow.getUTCHours();
-      const ampm = hh >= 12 ? 'pm' : 'am';
-      const h12 = hh % 12 || 12;
-      const serverTime = `${pad2(istNow.getUTCDate())} ${months[istNow.getUTCMonth()]} ${istNow.getUTCFullYear()}, ${pad2(h12)}:${pad2(istNow.getUTCMinutes())}:${pad2(istNow.getUTCSeconds())} ${ampm} IST`;
-
-      const html = buildBlockedPage({
-        asn: escapeHtml(asnStr),
-        org: escapeHtml(orgStr),
-        locationHtml,
-        serverTime
-      });
-
+      const data = buildBlockPageData();
+      const html = buildBlockedPage(data);
       return new Response(html, {
         status: 403,
         headers: {
