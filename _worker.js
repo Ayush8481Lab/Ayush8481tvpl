@@ -9,10 +9,9 @@ let lastInsertError = null;
 // ============================================================
 function buildBlockedPage({ asn, org, locationHtml, serverTime, descHtml }) {
   const desc = descHtml || `This content is <strong>not allowed in a web browser</strong>.<br>
-      <strong>Hint:</strong> Open this playlist URL in an IPTV player —
+      <strong>Solution :</strong> Open in IPTV player —
       <span class="player-hint">TiviMate</span>
-      <span class="player-hint">OTT Navigator</span>
-      <span class="player-hint">VLC</span>`;
+      <span class="player-hint">OTT Navigator</span>`;
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
