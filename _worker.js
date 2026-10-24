@@ -6,8 +6,6 @@ let lastInsertError = null;
 
 // ============================================================
 // BLOCKED BROWSER PAGE (HTML)
-// Serves the "Access Denied" page with live server-injected
-// ASN / org / location / time for the current request.
 // ============================================================
 function buildBlockedPage({ asn, org, locationHtml, serverTime }) {
   return `<!DOCTYPE html>
@@ -36,9 +34,6 @@ function buildBlockedPage({ asn, org, locationHtml, serverTime }) {
     -webkit-font-smoothing: antialiased;
   }
 
-  /* ============================================================
-     PAGE SWITCHER
-  ============================================================ */
   .page {
     position: fixed; inset: 0;
     z-index: 2;
@@ -53,9 +48,6 @@ function buildBlockedPage({ asn, org, locationHtml, serverTime }) {
     z-index: 1;
   }
 
-  /* ============================================================
-     SHARED BACKGROUND PRIMITIVES
-  ============================================================ */
   .bg-layer {
     position: fixed; inset: 0;
     z-index: 0;
@@ -111,9 +103,6 @@ function buildBlockedPage({ asn, org, locationHtml, serverTime }) {
     position: absolute; inset: 0;
   }
 
-  /* ============================================================
-     PAGE 1 BACKGROUND — AURORA STUDIO
-  ============================================================ */
   #page1 .aurora {
     position: absolute;
     top: -60%; left: -30%;
@@ -203,9 +192,6 @@ function buildBlockedPage({ asn, org, locationHtml, serverTime }) {
   }
   @keyframes glowSpin { to { transform: rotate(360deg); } }
 
-  /* ============================================================
-     PAGE 2 BACKGROUND — DANCING DOG GIF
-  ============================================================ */
   #page2 .dog-gif {
     position: absolute;
     inset: 0;
@@ -276,9 +262,6 @@ function buildBlockedPage({ asn, org, locationHtml, serverTime }) {
     background: radial-gradient(ellipse at 50% 45%, transparent 22%, rgba(0,0,0,.55) 100%);
   }
 
-  /* ============================================================
-     PAGE 1 — MINIMAL PLAYLIST FILE (centered)
-  ============================================================ */
   #page1 {
     display: flex;
     align-items: center;
@@ -419,9 +402,6 @@ function buildBlockedPage({ asn, org, locationHtml, serverTime }) {
     flex-shrink: 0;
   }
 
-  /* ============================================================
-     PAGE 2 — ACCESS DENIED + MUSIC EQ + REQUEST INFO
-  ============================================================ */
   #page2 {
     display: flex;
     align-items: center;
@@ -433,7 +413,7 @@ function buildBlockedPage({ asn, org, locationHtml, serverTime }) {
     position: relative;
     z-index: 2;
     width: 100%;
-    max-width: 600px;
+    max-width: 620px;
     text-align: center;
     animation: errIn .9s cubic-bezier(.16,1,.3,1) both;
   }
@@ -508,18 +488,34 @@ function buildBlockedPage({ asn, org, locationHtml, serverTime }) {
 
   .error-desc {
     margin: 0 auto;
-    max-width: 440px;
+    max-width: 520px;
     font-size: 14.5px;
-    line-height: 1.75;
-    color: rgba(255,255,255,.88);
+    line-height: 1.85;
+    color: rgba(255,255,255,.9);
     text-shadow:
       0 1px 6px rgba(0,0,0,.95),
       0 0 16px rgba(0,0,0,.8);
   }
 
-  /* ============================================================
-     UP-DOWN MUSIC VISUALIZER
-  ============================================================ */
+  .error-desc strong {
+    color: #f9a8d4;
+    font-weight: 800;
+  }
+
+  .player-hint {
+    display: inline-block;
+    padding: 2px 9px;
+    margin: 2px 3px 0;
+    border-radius: 6px;
+    background: rgba(168,85,247,.16);
+    border: 1px solid rgba(196,181,253,.38);
+    color: #e9d5ff;
+    font-weight: 700;
+    font-size: 0.92em;
+    white-space: nowrap;
+    text-shadow: 0 1px 2px rgba(0,0,0,.9);
+  }
+
   .eq-stage {
     position: relative;
     display: flex;
@@ -571,7 +567,9 @@ function buildBlockedPage({ asn, org, locationHtml, serverTime }) {
   }
 
   /* ============================================================
-     REQUESTED FROM INFO (1–2 lines · blue/light-blue · transparent)
+     REQUESTED FROM INFO — pure blue palette (no green tint)
+     Values come from request.cf on the server side and are
+     frozen at the moment the request was received.
   ============================================================ */
   .request-info {
     margin: 28px auto 0;
@@ -583,7 +581,7 @@ function buildBlockedPage({ asn, org, locationHtml, serverTime }) {
     font-size: clamp(11px, 2.6vw, 13px);
     line-height: 1.9;
     letter-spacing: .02em;
-    color: #93c5fd;
+    color: #dbeafe;
     text-shadow:
       0 1px 3px rgba(0,0,0,.95),
       0 0 12px rgba(0,0,0,.85);
@@ -597,24 +595,23 @@ function buildBlockedPage({ asn, org, locationHtml, serverTime }) {
 
   .request-info .ri-line { display: block; }
   .request-info .ri-asn {
-    color: #67e8f9;
+    color: #93c5fd;
     font-weight: 800;
   }
   .request-info .ri-org {
-    color: #a5f3fc;
+    color: #bfdbfe;
     font-weight: 700;
   }
   .request-info .ri-loc {
-    color: #bae6fd;
+    color: #dbeafe;
     font-weight: 500;
   }
   .request-info .ri-time {
-    color: #7dd3fc;
+    color: #60a5fa;
     font-weight: 600;
     font-variant-numeric: tabular-nums;
   }
 
-  /* ============ RESPONSIVE ============ */
   @media (max-width: 420px) {
     .provider-card { padding: 34px 24px 28px; border-radius: 18px; }
     .tv-icon-wrap { width: 82px; height: 82px; border-radius: 20px; margin-bottom: 22px; }
@@ -638,15 +635,10 @@ function buildBlockedPage({ asn, org, locationHtml, serverTime }) {
 </head>
 <body>
 
-<!-- audio (hidden, loops forever) -->
 <audio id="audio" loop preload="auto"
        src="https://p.scdn.co/mp3-preview/c2bad324c332e74b24b59299da9d6bfc410e299d"></audio>
 
-<!-- ============================================================
-     PAGE 1 — MINIMAL PLAYLIST FILE
-============================================================ -->
 <div class="page" id="page1">
-
   <div class="bg-layer" aria-hidden="true">
     <div class="aurora"></div>
     <div class="mesh"></div>
@@ -687,11 +679,7 @@ function buildBlockedPage({ asn, org, locationHtml, serverTime }) {
   </div>
 </div>
 
-<!-- ============================================================
-     PAGE 2 — ACCESS DENIED + MUSIC EQ + REQUEST INFO
-============================================================ -->
 <div class="page hidden" id="page2">
-
   <div class="bg-layer" aria-hidden="true">
     <img
       class="dog-gif"
@@ -712,22 +700,23 @@ function buildBlockedPage({ asn, org, locationHtml, serverTime }) {
     <div class="error-code">403</div>
     <h1 class="error-title">Access Denied</h1>
     <p class="error-desc">
-      You are not allowed to access this page on this browser.<br>
-      The requested resource is restricted and cannot be served.
+      This content is <strong>not allowed in a web browser</strong>.<br>
+      <strong>Hint:</strong> Open this playlist URL in an IPTV player —
+      <span class="player-hint">TiviMate</span>
+      <span class="player-hint">OTT Navigator</span>
+      <span class="player-hint">VLC</span>
     </p>
 
-    <!-- UP-DOWN MUSIC VISUALIZER -->
     <div class="eq-stage" aria-hidden="true">
       <div class="eq" id="eq"></div>
     </div>
 
-    <!-- REQUESTED FROM INFO (1–2 lines · blue / light-blue · transparent) -->
     <div class="request-info">
       <div class="ri-line">
         Requested from <span class="ri-asn">${asn}</span> <span class="ri-org">${org}</span>${locationHtml}
       </div>
       <div class="ri-line">
-        at <span class="ri-time" id="reqTime">${serverTime}</span>
+        at <span class="ri-time">${serverTime}</span>
       </div>
     </div>
   </div>
@@ -742,12 +731,10 @@ function buildBlockedPage({ asn, org, locationHtml, serverTime }) {
   const page1   = document.getElementById('page1');
   const page2   = document.getElementById('page2');
   const eq      = document.getElementById('eq');
-  const reqTime = document.getElementById('reqTime');
 
   audio.loop   = true;
   audio.volume = 0.85;
 
-  /* ---- page 1 particles ---- */
   document.querySelectorAll('.particles').forEach(function (layer) {
     for (let i = 0; i < 46; i++) {
       const p = document.createElement('i');
@@ -761,43 +748,16 @@ function buildBlockedPage({ asn, org, locationHtml, serverTime }) {
     }
   });
 
-  /* ---- up-down music equalizer (28 bars, varied heights + speeds) ---- */
   const BAR_COUNT = 28;
   for (let i = 0; i < BAR_COUNT; i++) {
     const bar = document.createElement('span');
-
-    /* centre bars taller, edges shorter — gives a nice "wave" silhouette */
     const centreBias = 1 - Math.abs((i / (BAR_COUNT - 1)) - 0.5) * 0.9;
     const dur = (0.55 + Math.random() * 0.85) / centreBias;
-
     bar.style.setProperty('--d',   dur.toFixed(2) + 's');
     bar.style.setProperty('--del', (-Math.random() * 1.6).toFixed(2) + 's');
     eq.appendChild(bar);
   }
 
-  /* ---- live IST clock for "Requested From" ---- */
-  function updateTime() {
-    try {
-      const now = new Date();
-      const formatted = now.toLocaleString('en-IN', {
-        timeZone: 'Asia/Kolkata',
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-        day: '2-digit',
-        month: 'short',
-        year: 'numeric',
-        hour12: true
-      });
-      reqTime.textContent = formatted + ' IST';
-    } catch (e) {
-      reqTime.textContent = new Date().toLocaleString() + ' IST';
-    }
-  }
-  updateTime();
-  setInterval(updateTime, 1000);
-
-  /* ---- load + autoplay + page swap ---- */
   let triggered = false;
 
   loadBtn.addEventListener('click', function () {
@@ -816,7 +776,6 @@ function buildBlockedPage({ asn, org, locationHtml, serverTime }) {
     });
   });
 
-  /* silent resume if browser pauses playback */
   document.addEventListener('click', function () {
     if (triggered && audio.paused) audio.play().catch(function () {});
   });
@@ -873,10 +832,6 @@ export default {
 
     // ============================================================
     // 2. BLOCK DATA CENTER PROVIDERS (Amazon / Cloudflare / Google)
-    //    Matches on request.cf.asOrganization by keyword — covers
-    //    all of their ASNs (13335, 16509, 14618, 15169, 396982,
-    //    19527, 8987, 38895, etc.) with one simple check.
-    //    Add ?allow=1 to any URL to bypass (for trusted testing).
     // ============================================================
     const BLOCKED_KEYWORDS = ["amazon", "cloudflare", "google"];
     const asOrgRaw = (request.cf?.asOrganization || '').toLowerCase();
@@ -1170,7 +1125,7 @@ export default {
     }
 
     // ============================================================
-    // DEBUG ENDPOINT — /<token>?debug=1  (or &test=1, &raw=1)
+    // DEBUG ENDPOINT — /<token>?debug=1
     // ============================================================
     if (isDebug) {
       let testResult = null;
@@ -1422,26 +1377,28 @@ export default {
     }
 
     // ============================================================
-    // NEW: BLOCKED BROWSER PAGE
+    // BLOCKED BROWSER PAGE
     // Serves the error page for browser requests (unless ?nocache=1
-    // or ?allow=1). Players and forced-cache-bypass requests fall
-    // through to normal playlist generation below.
+    // or ?allow=1). Time & location frozen at request moment.
     // ============================================================
     if (isBrowser && !forceNoCache && !allowBypass) {
       const asnStr = request.cf?.asn ? `AS${request.cf.asn}` : 'Unknown ASN';
       const orgStr = request.cf?.asOrganization || 'Unknown Provider';
       const cityStr = request.cf?.city || '';
       const regionStr = request.cf?.region || '';
-      const locStr = [cityStr, regionStr].filter(Boolean).join(', ');
+      const countryStr = request.cf?.country || '';
+      let locStr = [cityStr, regionStr].filter(Boolean).join(', ');
+      if (!locStr && countryStr) locStr = countryStr;
       const locationHtml = locStr ? `, <span class="ri-loc">${escapeHtml(locStr)}</span>` : '';
 
-      const istNow = new Date(Date.now() + 19800000);
+      // Freeze IST time at the exact moment this request arrived.
+      const istNow = new Date(nowMs + 19800000);
       const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-      const pad = (n) => String(n).padStart(2, '0');
-      const h = istNow.getUTCHours();
-      const ampm = h >= 12 ? 'pm' : 'am';
-      const h12 = h % 12 || 12;
-      const serverTime = `${pad(istNow.getUTCDate())} ${months[istNow.getUTCMonth()]} ${istNow.getUTCFullYear()}, ${pad(h12)}:${pad(istNow.getUTCMinutes())}:${pad(istNow.getUTCSeconds())} ${ampm} IST`;
+      const pad2 = (n) => String(n).padStart(2, '0');
+      const hh = istNow.getUTCHours();
+      const ampm = hh >= 12 ? 'pm' : 'am';
+      const h12 = hh % 12 || 12;
+      const serverTime = `${pad2(istNow.getUTCDate())} ${months[istNow.getUTCMonth()]} ${istNow.getUTCFullYear()}, ${pad2(h12)}:${pad2(istNow.getUTCMinutes())}:${pad2(istNow.getUTCSeconds())} ${ampm} IST`;
 
       const html = buildBlockedPage({
         asn: escapeHtml(asnStr),
