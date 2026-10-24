@@ -4,6 +4,836 @@ let schemaError = null;
 let lastInsertOk = null;
 let lastInsertError = null;
 
+// ============================================================
+// BLOCKED BROWSER PAGE (HTML)
+// Serves the "Access Denied" page with live server-injected
+// ASN / org / location / time for the current request.
+// ============================================================
+function buildBlockedPage({ asn, org, locationHtml, serverTime }) {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AyushTV8481.m3u</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+
+  :root {
+    --bg: #08060f;
+    --text: #ece9f7;
+    --muted: rgba(236,233,247,.55);
+    --purple: #a855f7;
+    --pink: #ec4899;
+  }
+
+  body {
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Inter, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ============================================================
+     PAGE SWITCHER
+  ============================================================ */
+  .page {
+    position: fixed; inset: 0;
+    z-index: 2;
+    overflow-y: auto;
+    overflow-x: hidden;
+    transition: opacity .7s ease, visibility .7s ease;
+  }
+  .page.hidden {
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    z-index: 1;
+  }
+
+  /* ============================================================
+     SHARED BACKGROUND PRIMITIVES
+  ============================================================ */
+  .bg-layer {
+    position: fixed; inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    overflow: hidden;
+  }
+
+  .blob {
+    position: absolute;
+    border-radius: 50%;
+    filter: blur(100px);
+    mix-blend-mode: screen;
+    will-change: transform;
+    animation: float 24s ease-in-out infinite;
+  }
+
+  @keyframes float {
+    0%, 100% { transform: translate3d(0,0,0) scale(1); }
+    33%      { transform: translate3d(80px,-60px,0) scale(1.18); }
+    66%      { transform: translate3d(-66px,50px,0) scale(.88); }
+  }
+
+  .grid {
+    position: absolute; inset: 0;
+    -webkit-mask-image: radial-gradient(circle at 50% 45%, #000 5%, transparent 76%);
+    mask-image: radial-gradient(circle at 50% 45%, #000 5%, transparent 76%);
+  }
+
+  .particles {
+    position: absolute; inset: 0;
+    overflow: hidden;
+  }
+  .particles i {
+    position: absolute;
+    left: var(--x);
+    top: var(--y);
+    width: var(--s);
+    height: var(--s);
+    border-radius: 50%;
+    background: hsl(var(--hue) 92% 74%);
+    box-shadow: 0 0 10px hsl(var(--hue) 92% 66% / .85);
+    opacity: 0;
+    will-change: transform, opacity;
+  }
+
+  .noise {
+    position: absolute; inset: 0;
+    mix-blend-mode: overlay;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+
+  .vignette {
+    position: absolute; inset: 0;
+  }
+
+  /* ============================================================
+     PAGE 1 BACKGROUND — AURORA STUDIO
+  ============================================================ */
+  #page1 .aurora {
+    position: absolute;
+    top: -60%; left: -30%;
+    width: 160%; height: 220%;
+    mix-blend-mode: screen;
+    filter: blur(70px);
+    opacity: .6;
+    background: conic-gradient(from 0deg at 50% 50%,
+      transparent 0deg,
+      rgba(168,85,247,.18) 55deg,
+      transparent 120deg,
+      rgba(236,72,153,.15) 175deg,
+      transparent 235deg,
+      rgba(34,211,238,.12) 295deg,
+      transparent 360deg);
+    animation: p1AuroraSpin 55s linear infinite;
+  }
+  @keyframes p1AuroraSpin { to { transform: rotate(360deg); } }
+
+  #page1 .mesh {
+    position: absolute; inset: 0;
+    mix-blend-mode: screen;
+    background:
+      radial-gradient(ellipse 80% 55% at 18% 8%,  rgba(124,58,237,.28), transparent 62%),
+      radial-gradient(ellipse 65% 55% at 82% 92%, rgba(219,39,119,.24), transparent 62%),
+      radial-gradient(ellipse 55% 45% at 50% 50%, rgba(14,116,144,.2),  transparent 62%),
+      radial-gradient(ellipse 45% 40% at 88% 18%, rgba(245,158,11,.1),  transparent 65%);
+    animation: p1MeshShift 22s ease-in-out infinite alternate;
+  }
+  @keyframes p1MeshShift {
+    0%   { transform: translate3d(0,0,0) scale(1); }
+    100% { transform: translate3d(-30px,20px,0) scale(1.06); }
+  }
+
+  #page1 .b1 { width: 520px; height: 520px; top: -190px; left: -170px;
+               background: radial-gradient(circle, #7c3aed, transparent 70%); opacity: .55; }
+  #page1 .b2 { width: 580px; height: 580px; bottom: -230px; right: -190px;
+               background: radial-gradient(circle, #db2777, transparent 70%); opacity: .55; animation-delay: -8s; }
+  #page1 .b3 { width: 460px; height: 460px; top: 38%; left: 55%;
+               background: radial-gradient(circle, #0e7490, transparent 70%); opacity: .45; animation-delay: -14s; }
+  #page1 .b4 { width: 300px; height: 300px; top: 6%; right: 8%;
+               background: radial-gradient(circle, #f59e0b, transparent 70%); opacity: .25; animation-delay: -5s; }
+
+  #page1 .grid {
+    background-image:
+      linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px);
+    background-size: 62px 62px;
+    animation: p1GridDrift 40s linear infinite;
+  }
+  @keyframes p1GridDrift {
+    to { background-position: 62px 62px, 62px 62px; }
+  }
+
+  #page1 .particles i {
+    animation: p1Rise var(--dur) ease-in-out infinite;
+    animation-delay: var(--del);
+  }
+  @keyframes p1Rise {
+    0%, 100% { opacity: 0; transform: translate3d(0, 0, 0) scale(.4); }
+    18%, 82% { opacity: .85; }
+    50%      { opacity: 1; transform: translate3d(34px, -46px, 0) scale(1); }
+  }
+
+  #page1 .noise { opacity: .04; }
+
+  #page1 .vignette {
+    background: radial-gradient(ellipse at 50% 45%, transparent 30%, rgba(3,2,10,.85) 100%);
+  }
+
+  #page1 .rotating-glow {
+    position: absolute;
+    top: 50%; left: 50%;
+    width: 520px; height: 520px;
+    margin: -260px 0 0 -260px;
+    border-radius: 50%;
+    background: conic-gradient(from 0deg,
+      rgba(168,85,247,.3),
+      rgba(236,72,153,.24),
+      rgba(34,211,238,.18),
+      rgba(245,158,11,.16),
+      rgba(168,85,247,.3));
+    filter: blur(85px);
+    z-index: 1;
+    pointer-events: none;
+    animation: glowSpin 34s linear infinite;
+  }
+  @keyframes glowSpin { to { transform: rotate(360deg); } }
+
+  /* ============================================================
+     PAGE 2 BACKGROUND — DANCING DOG GIF
+  ============================================================ */
+  #page2 .dog-gif {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    object-position: center;
+    filter: saturate(1.12) contrast(1.03) brightness(.98);
+    transform: scale(1.04);
+    animation: dogKenBurns 26s ease-in-out infinite alternate;
+    user-select: none;
+    pointer-events: none;
+  }
+  @keyframes dogKenBurns {
+    0%   { transform: scale(1.04) translate3d(0, 0, 0); }
+    100% { transform: scale(1.12) translate3d(-1.5%, -1.5%, 0); }
+  }
+
+  #page2 .dog-scrim {
+    position: absolute; inset: 0;
+    background:
+      radial-gradient(ellipse at 50% 45%,
+        rgba(0,0,0,.14) 0%,
+        rgba(0,0,0,.30) 62%,
+        rgba(0,0,0,.52) 100%),
+      linear-gradient(180deg, rgba(0,0,0,.18), rgba(0,0,0,.34));
+  }
+
+  #page2 .scanlines {
+    position: absolute; inset: 0;
+    pointer-events: none;
+    background: repeating-linear-gradient(
+      0deg,
+      rgba(0,0,0,.10) 0px,
+      rgba(0,0,0,.10) 1px,
+      transparent 1px,
+      transparent 3px
+    );
+    animation: scanlineMove 8s linear infinite;
+    opacity: .35;
+  }
+  @keyframes scanlineMove {
+    from { background-position: 0 0; }
+    to   { background-position: 0 100vh; }
+  }
+
+  #page2 .scan-beam {
+    position: absolute;
+    left: 0; right: 0;
+    height: 150px;
+    pointer-events: none;
+    background: linear-gradient(180deg,
+      transparent,
+      rgba(255,255,255,.04),
+      rgba(255,255,255,.07),
+      rgba(255,255,255,.04),
+      transparent);
+    animation: beamMove 6.5s ease-in-out infinite;
+  }
+  @keyframes beamMove {
+    0%, 100% { top: -150px; }
+    50%      { top: 100%; }
+  }
+
+  #page2 .noise { opacity: .05; }
+
+  #page2 .vignette {
+    background: radial-gradient(ellipse at 50% 45%, transparent 22%, rgba(0,0,0,.55) 100%);
+  }
+
+  /* ============================================================
+     PAGE 1 — MINIMAL PLAYLIST FILE (centered)
+  ============================================================ */
+  #page1 {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+
+  .provider-card {
+    position: relative;
+    z-index: 2;
+    width: 100%;
+    max-width: 380px;
+    padding: 42px 32px 36px;
+    border-radius: 22px;
+    text-align: center;
+    background: rgba(255,255,255,.045);
+    border: 1px solid rgba(255,255,255,.09);
+    backdrop-filter: blur(26px) saturate(160%);
+    -webkit-backdrop-filter: blur(26px) saturate(160%);
+    box-shadow:
+      0 34px 90px -30px rgba(0,0,0,.9),
+      0 0 0 1px rgba(255,255,255,.04) inset,
+      0 0 100px -25px rgba(168,85,247,.42);
+    animation: cardIn .85s cubic-bezier(.16,1,.3,1) both;
+  }
+
+  .provider-card::before {
+    content: "";
+    position: absolute;
+    top: -1px; left: 16%; right: 16%;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--purple), var(--pink), transparent);
+  }
+
+  @keyframes cardIn {
+    from { opacity: 0; transform: translateY(28px) scale(.97); }
+    to   { opacity: 1; transform: none; }
+  }
+
+  .tv-icon-wrap {
+    position: relative;
+    width: 96px;
+    height: 96px;
+    margin: 0 auto 26px;
+    display: grid;
+    place-items: center;
+    border-radius: 24px;
+    background: linear-gradient(135deg, rgba(168,85,247,.24), rgba(236,72,153,.15));
+    border: 1px solid rgba(196,181,253,.3);
+    box-shadow:
+      0 0 40px rgba(168,85,247,.4),
+      inset 0 1px 0 rgba(255,255,255,.14);
+  }
+  .tv-icon-wrap::after {
+    content: "";
+    position: absolute;
+    inset: -12px;
+    border-radius: 30px;
+    border: 1px solid rgba(168,85,247,.2);
+    animation: haloPulse 4s ease-out infinite;
+  }
+  @keyframes haloPulse {
+    0%   { transform: scale(.94); opacity: .85; }
+    100% { transform: scale(1.18); opacity: 0; }
+  }
+  .tv-icon-wrap svg {
+    width: 46px; height: 46px;
+    stroke: url(#tvGrad);
+    fill: none;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    filter: drop-shadow(0 0 10px rgba(196,181,253,.4));
+  }
+
+  .file-name {
+    margin: 0 0 30px;
+    font-size: clamp(24px, 5.5vw, 30px);
+    font-weight: 800;
+    letter-spacing: -.03em;
+    line-height: 1.15;
+    background: linear-gradient(100deg, #fff 10%, #c4b5fd 55%, #f9a8d4 92%);
+    -webkit-background-clip: text; background-clip: text;
+    color: transparent;
+    word-break: break-word;
+  }
+
+  .load-btn {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    width: 100%;
+    padding: 16px 24px;
+    font: inherit;
+    font-size: 15px;
+    font-weight: 800;
+    letter-spacing: .01em;
+    color: #fff;
+    border: 0;
+    border-radius: 12px;
+    cursor: pointer;
+    overflow: hidden;
+    isolation: isolate;
+    background: linear-gradient(135deg, var(--purple), var(--pink) 58%, #f97316);
+    box-shadow:
+      0 14px 40px -10px rgba(168,85,247,.85),
+      0 0 0 1px rgba(255,255,255,.16) inset,
+      0 -3px 0 rgba(0,0,0,.28) inset;
+    transition: transform .28s cubic-bezier(.16,1,.3,1),
+                box-shadow .28s ease;
+  }
+  .load-btn::after {
+    content: "";
+    position: absolute; top: 0; left: -130%;
+    width: 65%; height: 100%;
+    background: linear-gradient(100deg, transparent, rgba(255,255,255,.55), transparent);
+    transform: skewX(-22deg);
+    animation: sweep 3.4s ease-in-out infinite;
+  }
+  @keyframes sweep {
+    0%, 58% { left: -130%; }
+    100%    { left: 165%; }
+  }
+  .load-btn:hover {
+    transform: translateY(-2px) scale(1.01);
+    box-shadow:
+      0 20px 55px -10px rgba(236,72,153,.9),
+      0 0 0 1px rgba(255,255,255,.26) inset,
+      0 -3px 0 rgba(0,0,0,.28) inset;
+  }
+  .load-btn:active { transform: translateY(0) scale(.99); }
+  .load-btn:focus-visible { outline: 2px solid #c4b5fd; outline-offset: 4px; }
+  .load-btn svg {
+    width: 17px; height: 17px;
+    fill: currentColor;
+    flex-shrink: 0;
+  }
+
+  /* ============================================================
+     PAGE 2 — ACCESS DENIED + MUSIC EQ + REQUEST INFO
+  ============================================================ */
+  #page2 {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+
+  .error-content {
+    position: relative;
+    z-index: 2;
+    width: 100%;
+    max-width: 600px;
+    text-align: center;
+    animation: errIn .9s cubic-bezier(.16,1,.3,1) both;
+  }
+
+  .error-content::before {
+    content: "";
+    position: absolute;
+    inset: -34px -46px;
+    z-index: -1;
+    border-radius: 44px;
+    background: radial-gradient(ellipse at center,
+      rgba(0,0,0,.58) 0%,
+      rgba(0,0,0,.42) 45%,
+      rgba(0,0,0,.14) 72%,
+      transparent 88%);
+    filter: blur(16px);
+    pointer-events: none;
+  }
+
+  @keyframes errIn {
+    from { opacity: 0; transform: translateY(28px) scale(.97); }
+    to   { opacity: 1; transform: none; }
+  }
+
+  .error-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: .24em;
+    text-transform: uppercase;
+    color: #fecaca;
+    background: rgba(0,0,0,.35);
+    border: 1px solid rgba(255,255,255,.22);
+    padding: 6px 15px;
+    border-radius: 999px;
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+  }
+  .led {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: #ef4444;
+    box-shadow: 0 0 9px #ef4444;
+    animation: blink 1.7s ease-in-out infinite;
+  }
+  @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+
+  .error-code {
+    font-size: clamp(96px, 22vw, 168px);
+    font-weight: 900;
+    line-height: .92;
+    letter-spacing: -.06em;
+    margin: 18px 0 8px;
+    background: linear-gradient(115deg, #fecaca 4%, #f472b6 36%, #a855f7 70%, #22d3ee 100%);
+    -webkit-background-clip: text; background-clip: text;
+    color: transparent;
+    filter: drop-shadow(0 6px 18px rgba(0,0,0,.9))
+            drop-shadow(0 0 34px rgba(0,0,0,.75));
+  }
+
+  .error-title {
+    margin: 0 0 14px;
+    font-size: clamp(24px, 5vw, 34px);
+    font-weight: 800;
+    letter-spacing: -.02em;
+    color: #ffffff;
+    text-shadow:
+      0 2px 8px rgba(0,0,0,.95),
+      0 0 22px rgba(0,0,0,.85);
+  }
+
+  .error-desc {
+    margin: 0 auto;
+    max-width: 440px;
+    font-size: 14.5px;
+    line-height: 1.75;
+    color: rgba(255,255,255,.88);
+    text-shadow:
+      0 1px 6px rgba(0,0,0,.95),
+      0 0 16px rgba(0,0,0,.8);
+  }
+
+  /* ============================================================
+     UP-DOWN MUSIC VISUALIZER
+  ============================================================ */
+  .eq-stage {
+    position: relative;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    gap: 4px;
+    height: 70px;
+    max-width: 420px;
+    margin: 34px auto 0;
+    padding: 0 6px;
+  }
+
+  .eq-stage::before {
+    content: "";
+    position: absolute;
+    left: 0; right: 0; bottom: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,.28), transparent);
+  }
+
+  .eq {
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    gap: 4px;
+    width: 100%;
+    height: 100%;
+  }
+
+  .eq span {
+    flex: 1;
+    max-width: 7px;
+    height: 100%;
+    border-radius: 99px;
+    background: linear-gradient(180deg, #67e8f9, #a855f7 52%, #f472b6);
+    box-shadow:
+      0 0 10px rgba(168,85,247,.55),
+      0 0 4px rgba(244,114,182,.6);
+    transform: scaleY(.1);
+    transform-origin: bottom;
+    animation: bounce var(--d) ease-in-out infinite alternate;
+    animation-delay: var(--del);
+  }
+
+  @keyframes bounce {
+    0%   { transform: scaleY(.08); opacity: .55; }
+    35%  { transform: scaleY(.85); opacity: .9; }
+    100% { transform: scaleY(1);   opacity: 1; }
+  }
+
+  /* ============================================================
+     REQUESTED FROM INFO (1–2 lines · blue/light-blue · transparent)
+  ============================================================ */
+  .request-info {
+    margin: 28px auto 0;
+    max-width: 640px;
+    padding: 0 8px;
+    background: transparent;
+    text-align: center;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: clamp(11px, 2.6vw, 13px);
+    line-height: 1.9;
+    letter-spacing: .02em;
+    color: #93c5fd;
+    text-shadow:
+      0 1px 3px rgba(0,0,0,.95),
+      0 0 12px rgba(0,0,0,.85);
+    animation: infoIn .9s cubic-bezier(.16,1,.3,1) .35s both;
+  }
+
+  @keyframes infoIn {
+    from { opacity: 0; transform: translateY(14px); }
+    to   { opacity: 1; transform: none; }
+  }
+
+  .request-info .ri-line { display: block; }
+  .request-info .ri-asn {
+    color: #67e8f9;
+    font-weight: 800;
+  }
+  .request-info .ri-org {
+    color: #a5f3fc;
+    font-weight: 700;
+  }
+  .request-info .ri-loc {
+    color: #bae6fd;
+    font-weight: 500;
+  }
+  .request-info .ri-time {
+    color: #7dd3fc;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ============ RESPONSIVE ============ */
+  @media (max-width: 420px) {
+    .provider-card { padding: 34px 24px 28px; border-radius: 18px; }
+    .tv-icon-wrap { width: 82px; height: 82px; border-radius: 20px; margin-bottom: 22px; }
+    .tv-icon-wrap svg { width: 40px; height: 40px; }
+    .file-name { margin-bottom: 26px; }
+    #page1 .rotating-glow { width: 380px; height: 380px; margin: -190px 0 0 -190px; }
+    .error-content::before { inset: -26px -20px; border-radius: 32px; }
+    .eq-stage { height: 56px; max-width: 340px; gap: 3px; }
+    .eq { gap: 3px; }
+    .request-info { font-size: 11px; padding: 0 4px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: .01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: .01ms !important;
+    }
+  }
+</style>
+</head>
+<body>
+
+<!-- audio (hidden, loops forever) -->
+<audio id="audio" loop preload="auto"
+       src="https://p.scdn.co/mp3-preview/c2bad324c332e74b24b59299da9d6bfc410e299d"></audio>
+
+<!-- ============================================================
+     PAGE 1 — MINIMAL PLAYLIST FILE
+============================================================ -->
+<div class="page" id="page1">
+
+  <div class="bg-layer" aria-hidden="true">
+    <div class="aurora"></div>
+    <div class="mesh"></div>
+    <div class="blob b1"></div>
+    <div class="blob b2"></div>
+    <div class="blob b3"></div>
+    <div class="blob b4"></div>
+    <div class="grid"></div>
+    <div class="particles" data-page="1"></div>
+    <div class="noise"></div>
+    <div class="vignette"></div>
+  </div>
+
+  <div class="rotating-glow" aria-hidden="true"></div>
+
+  <div class="provider-card">
+    <div class="tv-icon-wrap">
+      <svg viewBox="0 0 24 24">
+        <defs>
+          <linearGradient id="tvGrad" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stop-color="#c4b5fd"/>
+            <stop offset="100%" stop-color="#f9a8d4"/>
+          </linearGradient>
+        </defs>
+        <rect x="2.2" y="6.4" width="19.6" height="12.6" rx="2.4"/>
+        <path d="M7.2 2.8l4.8 3.6 4.8-3.6"/>
+        <path d="M8.6 22h6.8"/>
+        <path d="M9.6 10.4h4.8"/>
+      </svg>
+    </div>
+
+    <h1 class="file-name">AyushTV8481.m3u</h1>
+
+    <button class="load-btn" id="loadBtn" type="button">
+      <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+      <span>Load Playlist</span>
+    </button>
+  </div>
+</div>
+
+<!-- ============================================================
+     PAGE 2 — ACCESS DENIED + MUSIC EQ + REQUEST INFO
+============================================================ -->
+<div class="page hidden" id="page2">
+
+  <div class="bg-layer" aria-hidden="true">
+    <img
+      class="dog-gif"
+      src="https://media.tenor.com/fjFefVXbjosAAAAM/funny-dog-dance-dancing-dog.gif"
+      alt=""
+      loading="eager"
+      draggable="false"
+    />
+    <div class="dog-scrim"></div>
+    <div class="scanlines"></div>
+    <div class="scan-beam"></div>
+    <div class="noise"></div>
+    <div class="vignette"></div>
+  </div>
+
+  <div class="error-content">
+    <span class="error-badge"><span class="led"></span>403 · Forbidden</span>
+    <div class="error-code">403</div>
+    <h1 class="error-title">Access Denied</h1>
+    <p class="error-desc">
+      You are not allowed to access this page on this browser.<br>
+      The requested resource is restricted and cannot be served.
+    </p>
+
+    <!-- UP-DOWN MUSIC VISUALIZER -->
+    <div class="eq-stage" aria-hidden="true">
+      <div class="eq" id="eq"></div>
+    </div>
+
+    <!-- REQUESTED FROM INFO (1–2 lines · blue / light-blue · transparent) -->
+    <div class="request-info">
+      <div class="ri-line">
+        Requested from <span class="ri-asn">${asn}</span> <span class="ri-org">${org}</span>${locationHtml}
+      </div>
+      <div class="ri-line">
+        at <span class="ri-time" id="reqTime">${serverTime}</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  const audio   = document.getElementById('audio');
+  const loadBtn = document.getElementById('loadBtn');
+  const page1   = document.getElementById('page1');
+  const page2   = document.getElementById('page2');
+  const eq      = document.getElementById('eq');
+  const reqTime = document.getElementById('reqTime');
+
+  audio.loop   = true;
+  audio.volume = 0.85;
+
+  /* ---- page 1 particles ---- */
+  document.querySelectorAll('.particles').forEach(function (layer) {
+    for (let i = 0; i < 46; i++) {
+      const p = document.createElement('i');
+      p.style.setProperty('--x',   (Math.random() * 100).toFixed(2) + '%');
+      p.style.setProperty('--y',   (Math.random() * 100).toFixed(2) + '%');
+      p.style.setProperty('--s',   (1.2 + Math.random() * 2.4).toFixed(2) + 'px');
+      p.style.setProperty('--dur', (9 + Math.random() * 14).toFixed(2) + 's');
+      p.style.setProperty('--del', (-Math.random() * 20).toFixed(2) + 's');
+      p.style.setProperty('--hue', Math.floor(260 + Math.random() * 100));
+      layer.appendChild(p);
+    }
+  });
+
+  /* ---- up-down music equalizer (28 bars, varied heights + speeds) ---- */
+  const BAR_COUNT = 28;
+  for (let i = 0; i < BAR_COUNT; i++) {
+    const bar = document.createElement('span');
+
+    /* centre bars taller, edges shorter — gives a nice "wave" silhouette */
+    const centreBias = 1 - Math.abs((i / (BAR_COUNT - 1)) - 0.5) * 0.9;
+    const dur = (0.55 + Math.random() * 0.85) / centreBias;
+
+    bar.style.setProperty('--d',   dur.toFixed(2) + 's');
+    bar.style.setProperty('--del', (-Math.random() * 1.6).toFixed(2) + 's');
+    eq.appendChild(bar);
+  }
+
+  /* ---- live IST clock for "Requested From" ---- */
+  function updateTime() {
+    try {
+      const now = new Date();
+      const formatted = now.toLocaleString('en-IN', {
+        timeZone: 'Asia/Kolkata',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+        hour12: true
+      });
+      reqTime.textContent = formatted + ' IST';
+    } catch (e) {
+      reqTime.textContent = new Date().toLocaleString() + ' IST';
+    }
+  }
+  updateTime();
+  setInterval(updateTime, 1000);
+
+  /* ---- load + autoplay + page swap ---- */
+  let triggered = false;
+
+  loadBtn.addEventListener('click', function () {
+    if (triggered) return;
+    triggered = true;
+
+    const p = audio.play();
+    if (p && typeof p.catch === 'function') p.catch(function () {});
+
+    page1.classList.add('hidden');
+    page2.classList.remove('hidden');
+
+    audio.addEventListener('ended', function () {
+      audio.currentTime = 0;
+      audio.play().catch(function () {});
+    });
+  });
+
+  /* silent resume if browser pauses playback */
+  document.addEventListener('click', function () {
+    if (triggered && audio.paused) audio.play().catch(function () {});
+  });
+
+  audio.addEventListener('pause', function () {
+    if (triggered && !audio.ended) {
+      setTimeout(function () {
+        if (triggered && audio.paused) audio.play().catch(function () {});
+      }, 350);
+    }
+  });
+})();
+</script>
+</body>
+</html>`;
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -591,6 +1421,46 @@ export default {
       return Response.redirect(finalCatchupUrl, 302);
     }
 
+    // ============================================================
+    // NEW: BLOCKED BROWSER PAGE
+    // Serves the error page for browser requests (unless ?nocache=1
+    // or ?allow=1). Players and forced-cache-bypass requests fall
+    // through to normal playlist generation below.
+    // ============================================================
+    if (isBrowser && !forceNoCache && !allowBypass) {
+      const asnStr = request.cf?.asn ? `AS${request.cf.asn}` : 'Unknown ASN';
+      const orgStr = request.cf?.asOrganization || 'Unknown Provider';
+      const cityStr = request.cf?.city || '';
+      const regionStr = request.cf?.region || '';
+      const locStr = [cityStr, regionStr].filter(Boolean).join(', ');
+      const locationHtml = locStr ? `, <span class="ri-loc">${escapeHtml(locStr)}</span>` : '';
+
+      const istNow = new Date(Date.now() + 19800000);
+      const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      const pad = (n) => String(n).padStart(2, '0');
+      const h = istNow.getUTCHours();
+      const ampm = h >= 12 ? 'pm' : 'am';
+      const h12 = h % 12 || 12;
+      const serverTime = `${pad(istNow.getUTCDate())} ${months[istNow.getUTCMonth()]} ${istNow.getUTCFullYear()}, ${pad(h12)}:${pad(istNow.getUTCMinutes())}:${pad(istNow.getUTCSeconds())} ${ampm} IST`;
+
+      const html = buildBlockedPage({
+        asn: escapeHtml(asnStr),
+        org: escapeHtml(orgStr),
+        locationHtml,
+        serverTime
+      });
+
+      return new Response(html, {
+        status: 403,
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+          "CDN-Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff"
+        }
+      });
+    }
+
     // 5. Fetch Core Data
     const fetchJson = async (target) => {
       try {
@@ -755,12 +1625,7 @@ export default {
         m3u += `#EXTVLCOPT:http-user-agent=com.graymatrix.did;Android TV;5.82.6(203230929);Android(10);Xiaomi(Redmi Note 8 Pro)\n`;
       }
 
-      if (isBrowser) {
-        const random5Digit = Math.floor(10000 + Math.random() * 90000);
-        m3u += `${workerBase}?stream=${random5Digit}\n\n`;
-      } else {
-        m3u += `${c.url}\n\n`;
-      }
+      m3u += `${c.url}\n\n`;
     });
 
     // 8. Cache count increment (only when D1 not in use)
@@ -774,22 +1639,17 @@ export default {
       })));
     }
 
-    // 9. Return Response
+    // 9. Return Response (players / ?nocache=1 only — browsers returned earlier)
     const responseHeaders = {
         "Content-Type": "application/vnd.apple.mpegurl; charset=utf-8",
         "Access-Control-Allow-Origin": "*",
         "Content-Disposition": "attachment; filename=\"Ayush@8481.m3u\"",
-        "Vary": "User-Agent, Accept, Sec-Fetch-Dest"
+        "Vary": "User-Agent, Accept, Sec-Fetch-Dest",
+        "Cache-Control": "private, no-cache, no-store, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+        "Expires": "0",
+        "CDN-Cache-Control": "no-store"
     };
-
-    if (isBrowser && !forceNoCache) {
-        responseHeaders["Cache-Control"] = "public, max-age=259200";
-    } else {
-        responseHeaders["Cache-Control"] = "private, no-cache, no-store, must-revalidate, max-age=0";
-        responseHeaders["Pragma"] = "no-cache";
-        responseHeaders["Expires"] = "0";
-    }
-    responseHeaders["CDN-Cache-Control"] = "no-store";
 
     return new Response(m3u, { headers: responseHeaders });
   }
