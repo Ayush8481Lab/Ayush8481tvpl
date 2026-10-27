@@ -1607,7 +1607,7 @@ export default {
     const responseHeaders = {
         "Content-Type": "application/vnd.apple.mpegurl; charset=utf-8",
         "Access-Control-Allow-Origin": "*",
-        "Content-Disposition": "attachment; filename=\"Ayush@8481.m3u\"",
+        "Content-Disposition": "attachment; filename=\"Ayush@8481\"",
         "Vary": "User-Agent, Accept, Sec-Fetch-Dest",
         "Cache-Control": "private, no-cache, no-store, must-revalidate, max-age=0",
         "Pragma": "no-cache",
