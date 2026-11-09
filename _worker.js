@@ -800,32 +800,22 @@ export default {
     let pathToken = "";
     let action = "";
 
-    // ============================================================
-    // NEW ROUTING: /live/<token> and /catchup/<token>
-    // Also keeps old /<token>/<action> and /credit/<token> working
-    // ============================================================
-    if (pathParts[0] === 'credit' && pathParts[1]) {
-      action = 'credit';
-      pathToken = pathParts[1];
-    } else if (pathParts[0] === 'live' && pathParts[1]) {
-      action = 'live';
-      pathToken = pathParts[1];
-    } else if (pathParts[0] === 'catchup' && pathParts[1]) {
-      action = 'catchup_json';
-      pathToken = pathParts[1];
+    if (pathParts[0] === 'credit') {
+        action = 'credit';
+        pathToken = pathParts[1];
     } else {
-      pathToken = pathParts[0];
-      action = pathParts[1] || '';
+        pathToken = pathParts[0];
+        action = pathParts[1];
     }
 
     const workerBase = `${url.origin}/${pathToken}`;
 
     if (!pathToken) {
-      return new Response("Token required. Format: /<token> or /credit/<token> or /live/<token> or /catchup/<token>", { status: 400 });
+      return new Response("Token required. Format: /<token> or /credit/<token>", { status: 400 });
     }
 
     // ============================================================
-    // SHARED HELPERS
+    // SHARED HELPERS (moved up so token-error page can use them)
     // ============================================================
     const nowMs = Date.now();
     const istDateObj = new Date(nowMs + 19800000);
@@ -854,7 +844,7 @@ export default {
     };
 
     // ============================================================
-    // 1. Verify Access Token
+    // 1. Verify Access Token — invalid token → same blocked page
     // ============================================================
     try {
       const accessReq = await fetch("https://raw.githubusercontent.com/Ayush8481Lab/Sar/refs/heads/main/app/data/access.json", {
@@ -882,7 +872,7 @@ export default {
     }
 
     // ============================================================
-    // 2. BLOCK DATA CENTER PROVIDERS
+    // 2. BLOCK DATA CENTER PROVIDERS (Amazon / Cloudflare / Google)
     // ============================================================
     const BLOCKED_KEYWORDS = ["amazon", "cloudflare", "google"];
     const asOrgRaw = (request.cf?.asOrganization || '').toLowerCase();
@@ -1003,7 +993,7 @@ export default {
     };
 
     // ============================================================
-    // IP → GEO
+    // IP → "[AS45609 Bharti Airtel Limited, Lucknow, Uttar Pradesh, IN]"
     // ============================================================
     const buildGeoFromCF = (cf) => {
       if (!cf) return '';
@@ -1038,7 +1028,7 @@ export default {
     };
 
     // ============================================================
-    // LOG THE REQUEST
+    // LOG THE REQUEST (skip credit page + debug)
     // ============================================================
     if (action !== 'credit' && !isDebug) {
       const xff = (request.headers.get('x-forwarded-for') || '').split(',')[0].trim();
@@ -1061,7 +1051,7 @@ export default {
     }
 
     // ============================================================
-    // CACHED COOKIE HELPERS
+    // --- Helper: generic cached cookie --- (unchanged)
     // ============================================================
     const getCachedCookie = async (fetchUrl, cacheKeyUrl, prefix) => {
       const cache = caches.default;
@@ -1100,6 +1090,9 @@ export default {
       return "";
     };
 
+    // ============================================================
+    // --- Helper: SonyLiv rotating cookie --- (unchanged)
+    // ============================================================
     const getSonyLivCookie = async () => {
       const cache = caches.default;
       const req = new Request("https://dummy.internal.local/cookie/sonyliv");
@@ -1141,7 +1134,7 @@ export default {
     };
 
     // ============================================================
-    // COUNT
+    // COUNT (D1 → COUNT(*), cache → stored counter)
     // ============================================================
     const cache = caches.default;
     const rlCacheUrl = new URL(`https://dummy.internal.local/ratelimit/${pathToken}/${istDateString}`);
@@ -1164,7 +1157,7 @@ export default {
     }
 
     // ============================================================
-    // DEBUG ENDPOINT
+    // DEBUG ENDPOINT — /<token>?debug=1
     // ============================================================
     if (isDebug) {
       let testResult = null;
@@ -1242,7 +1235,7 @@ export default {
     }
 
     // ============================================================
-    // 3. Credit Endpoint
+    // 3. Credit Endpoint — HTML dashboard (last 7 days)
     // ============================================================
     if (action === "credit") {
       if (url.searchParams.get('raw') === '1') {
@@ -1385,10 +1378,7 @@ export default {
       });
     }
 
-    // ============================================================
-    // 4. Catchup Redirect Handler (JioTV Catchup ONLY) — OLD STYLE
-    //    /<token>/catchup.mpd?url=...&start=...&end=...
-    // ============================================================
+    // 4. Catchup Redirect Handler (JioTV Catchup ONLY)
     if (action === "catchup.mpd" || action === "catchup") {
       const targetUrl = url.searchParams.get("url");
       const start = url.searchParams.get("start");
@@ -1419,10 +1409,9 @@ export default {
     }
 
     // ============================================================
-    // BLOCKED BROWSER PAGE — skipped for /live and /catchup JSON
+    // BLOCKED BROWSER PAGE (default player-hint message)
     // ============================================================
-    const isJsonApi = action === 'live' || action === 'catchup_json';
-    if (isBrowser && !forceNoCache && !allowBypass && !isJsonApi) {
+    if (isBrowser && !forceNoCache && !allowBypass) {
       const data = buildBlockPageData();
       const html = buildBlockedPage(data);
       return new Response(html, {
@@ -1436,9 +1425,7 @@ export default {
       });
     }
 
-    // ============================================================
     // 5. Fetch Core Data
-    // ============================================================
     const fetchJson = async (target) => {
       try {
         const res = await fetch(target, { headers: { 'User-Agent': 'Mozilla/5.0' } });
@@ -1524,9 +1511,7 @@ export default {
       }
     });
 
-    // ============================================================
     // 6. Apply Custom Playlist Sorting & Filtering
-    // ============================================================
     if (customPlaylistData && Array.isArray(customPlaylistData) && customPlaylistData.length > 0) {
         const channelMap = new Map();
         finalChannels.forEach(c => channelMap.set(String(c.id || c.channel_id), c));
@@ -1543,109 +1528,7 @@ export default {
         if (sortedChannels.length > 0) finalChannels = sortedChannels;
     }
 
-    // ============================================================
-    // 6.5 JSON ENDPOINTS: /live/<token> and /catchup/<token>
-    // ============================================================
-    if (action === 'live' || action === 'catchup_json') {
-      // extract exp from cookie strings
-      const getExpFromCookie = (cookie) => {
-        if (!cookie) return null;
-        const match = /exp=(\d+)/.exec(cookie);
-        return match ? parseInt(match[1], 10) : null;
-      };
-
-      // fetch cp cookie lazily (only for these endpoints)
-      const cpCookie = await getCachedCookie(
-        "https://ayushsupercompro.onrender.com/cookies/cp.json",
-        "https://dummy.internal.local/cookie/cp",
-        "__hdnea__="
-      );
-
-      const exps = [];
-      const mbExp = getExpFromCookie(mbCookie);
-      const cpExp = getExpFromCookie(cpCookie);
-      const sonyExp = getExpFromCookie(slivCookie);
-
-      if (action === 'live') {
-        // mblive + pllive(cp) + sony
-        if (mbExp) exps.push(mbExp);
-        if (cpExp) exps.push(cpExp);
-        if (sonyExp) exps.push(sonyExp);
-      } else {
-        // catchup: cod(cp) + sony
-        if (cpExp) exps.push(cpExp);
-        if (sonyExp) exps.push(sonyExp);
-      }
-      const expireTs = exps.length ? Math.min(...exps) : null;
-
-      const jsonChannels = [];
-      finalChannels.forEach(c => {
-        const isSony = c.isSonyLiv === true;
-        const jioCatchup = catchupDict.get(String(c.id));
-        const hasCatchup = isSony || !!jioCatchup;
-
-        // For catchup endpoint only include channels that support catchup
-        if (action === 'catchup_json' && !hasCatchup) return;
-
-        // ---- license field: prefer clearkey (keyId:key or keys[]), fallback to license / licenseurl ----
-        let licenseField = "";
-        if (c.keyId && c.key &&
-            c.keyId !== "null" && c.key !== "null" &&
-            c.keyId !== "" && c.key !== "") {
-          licenseField = `${c.keyId}:${c.key}`;
-        } else if (Array.isArray(c.keys) && c.keys.length > 0) {
-          licenseField = c.keys.join(",");
-        } else if (c.license && typeof c.license === "string" &&
-                   c.license.trim() !== "" && c.license !== "null") {
-          licenseField = c.license.trim();
-        } else if (c.licenseurl && typeof c.licenseurl === "string" &&
-                   c.licenseurl.trim() !== "" && c.licenseurl !== "null") {
-          licenseField = c.licenseurl.trim();
-        }
-
-        // ---- stream url ----
-        let streamUrl = c.url;
-
-        if (action === 'catchup_json') {
-          if (isSony) {
-            const parts = c.url.split('?');
-            const baseUrl = parts[0];
-            const queryParams = parts[1] || '';
-            const catchupBase = baseUrl.replace('master.m3u8', 'master-archive.m3u8');
-            streamUrl = `${catchupBase}?startTime={utc}&endTime={utcend}${queryParams ? '&' + queryParams : ''}`;
-          } else if (jioCatchup) {
-            const encUrl = encodeURIComponent(jioCatchup);
-            streamUrl = `${workerBase}/catchup.mpd?url=${encUrl}&start={utc}&end={utcend}`;
-          }
-        }
-
-        jsonChannels.push({
-          id: String(c.id || c.channel_id || ''),
-          name: c.name || 'Unknown Channel',
-          category: c.category || c.group || c.group_title || 'Others',
-          logo: c.logo || '',
-          license: licenseField,
-          url: streamUrl
-        });
-      });
-
-      return new Response(JSON.stringify({
-        expire: expireTs,
-        count: jsonChannels.length,
-        channels: jsonChannels
-      }, null, 2), {
-        headers: {
-          "Content-Type": "application/json; charset=utf-8",
-          "Access-Control-Allow-Origin": "*",
-          "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-          "CDN-Cache-Control": "no-store"
-        }
-      });
-    }
-
-    // ============================================================
-    // 7. Generate Final M3U Playlist (unchanged)
-    // ============================================================
+    // 7. Generate Final M3U Playlist
     let m3u = `#EXTM3U x-tvg-url="https://epg.ayush848694.workers.dev/${pathToken}"\n\n`;
 
     finalChannels.forEach(c => {
@@ -1709,9 +1592,7 @@ export default {
       m3u += `${c.url}\n\n`;
     });
 
-    // ============================================================
     // 8. Cache count increment (only when D1 not in use)
-    // ============================================================
     if (!(hasD1 && schemaReady)) {
       const nextCount = reqCount + 1;
       const nextMidnightIST = new Date(istDateObj);
@@ -1722,9 +1603,7 @@ export default {
       })));
     }
 
-    // ============================================================
-    // 9. Return M3U Response
-    // ============================================================
+    // 9. Return Response (players / ?nocache=1 only — browsers returned earlier)
     const responseHeaders = {
         "Content-Type": "application/vnd.apple.mpegurl; charset=utf-8",
         "Access-Control-Allow-Origin": "*",
